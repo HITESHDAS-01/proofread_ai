@@ -1,0 +1,44 @@
+AI Proofreader — Proprietary License
+Copyright (c) 2026 Pranjit Das. All rights reserved.
+
+1. GRANT
+Subject to the terms below, you are granted a personal, non-exclusive,
+non-transferable, worldwide license to install and use AI Proofreader
+("the Software") on devices you own or control.
+
+2. BRING YOUR OWN KEY (BYOK)
+The Software requires third-party LLM API keys that you obtain yourself
+from the respective providers. The Software does not include, embed, or
+resell any API access. You are responsible for:
+  - Creating and maintaining your own API keys;
+  - Compliance with each provider's terms of service;
+  - Any usage charges on your API accounts (free tiers may apply).
+
+3. LIMITATIONS
+You may NOT:
+  a) Sell, sublicense, rent, or redistribute the Software as a product;
+  b) Remove or alter copyright notices or this license;
+  c) Reverse-engineer the Software except to the extent permitted by
+     applicable law;
+  d) Use the Software to provide a competing hosted service without
+     written permission;
+  e) Bundle the Software with malware or use it to violate any law.
+
+4. YOUR CONTENT
+Text you proofread is sent to the LLM provider you configured. The
+Software stores settings, API keys, and correction history locally on
+your device. See PRIVACY.md for details.
+
+5. NO WARRANTY
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING
+FROM USE OF THE SOFTWARE.
+
+6. TERMINATION
+This license terminates automatically if you breach any term. Upon
+termination you must stop using and destroy all copies of the Software.
+
+7. CONTACT
+Developer: Pranjit Das
