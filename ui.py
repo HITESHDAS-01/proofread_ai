@@ -209,7 +209,10 @@ class LoadingPopup(ctk.CTkToplevel):
         self._bar = ctk.CTkProgressBar(card, width=200, height=6, corner_radius=99)
         self._bar.pack(pady=(16, 18))
         self._bar.configure(mode="indeterminate", progress_color=ACCENT)
-        self._bar.start(0.09)
+        try:
+            self._bar.start()
+        except TypeError:
+            pass
         self._tick()
 
     def _noactivate(self):

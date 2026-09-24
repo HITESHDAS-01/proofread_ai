@@ -262,25 +262,44 @@ def _is_our_window(hwnd) -> bool:
     return pid.value == os.getpid()
 
 
+def _get_foreground_title(hwnd):
+    if not hwnd or sys.platform != "win32":
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+        return buf.value
+    except Exception:
+        return ""
+
+
 def capture_selected_text(pre_fg=None):
     original_clip = _read_clipboard()
     seq0 = _clipboard_seq()
     fg = pre_fg or _get_foreground()
     if _is_our_window(fg):
-        # Fallback: previous non-our window is unknown; still try restore later
+        fg = None
         log.warning("foreground was our window at capture start")
+    log.info(
+        "capture start fg=%s title=%r our=%s seq=%s",
+        fg,
+        _get_foreground_title(fg),
+        _is_our_window(fg),
+        seq0,
+    )
 
     _wait_modifiers_up(0.7)
     focused = False
-    if fg and not _is_our_window(fg):
+    if fg:
         focused = _set_foreground(fg)
+        log.info("initial focus ok=%s now_fg=%s", focused, _get_foreground())
     time.sleep(0.1)
 
     captured = ""
     attempts = 0
     for attempt in range(4):
         attempts = attempt + 1
-        if fg and not _is_our_window(fg):
+        if fg:
             if _get_foreground() != fg:
                 focused = _set_foreground(fg)
                 time.sleep(0.08)
@@ -289,27 +308,24 @@ def capture_selected_text(pre_fg=None):
 
         actual_fg = _get_foreground()
         log.info(
-            "capture attempt=%d fg_match=%s our_window=%s",
+            "capture attempt=%d fg_match=%s our_window=%s title=%r",
             attempt + 1,
             actual_fg == fg,
             _is_our_window(actual_fg),
+            _get_foreground_title(actual_fg),
         )
 
-        # Only send Ctrl+C when target window actually has focus
-        if fg and actual_fg == fg:
-            _send_copy()
-        elif not fg:
+        # Send Ctrl+C when target has focus (or no target known)
+        if not fg or actual_fg == fg:
             _send_copy()
         else:
-            # retry focus once more, then try anyway
             _set_foreground(fg)
-            time.sleep(0.1)
+            time.sleep(0.12)
             if _get_foreground() == fg:
                 _send_copy()
             else:
-                time.sleep(0.15)
-                _wait_modifiers_up(0.25)
-                continue
+                log.warning("cannot focus target; sending copy anyway")
+                _send_copy()
 
         wait = 2.0 if attempt == 0 else 1.5
         deadline = time.time() + wait
@@ -321,7 +337,6 @@ def capture_selected_text(pre_fg=None):
             time.sleep(0.1)
             value = _read_clipboard()
             if value.strip():
-                # Ignore leftover sentinel-looking junk from older builds
                 if value.startswith("__AI_PR_CAPTURE_"):
                     seq0 = seq
                     continue
@@ -331,7 +346,7 @@ def capture_selected_text(pre_fg=None):
         if captured:
             break
         seq0 = _clipboard_seq()
-        if fg and not _is_our_window(fg):
+        if fg:
             _set_foreground(fg)
         _wait_modifiers_up(0.3)
 
@@ -472,14 +487,11 @@ def on_hotkey():
         pre_fg = None
     log.info("hotkey: pre_fg=%s our=%s", pre_fg, _is_our_window(pre_fg))
     _busy = True
-    # Loading must never activate (see LoadingPopup WS_EX_NOACTIVATE)
-    ui(_show_loading)
 
     def run():
         global _busy
         try:
-            # Small delay so loading window is mapped without stealing focus
-            time.sleep(0.05)
+            # Capture first — no loading window can steal focus
             text, original_clip, fg = capture_selected_text(pre_fg)
             if not text.strip():
                 log.info("no text captured (fg=%s)", bool(fg))
@@ -490,6 +502,8 @@ def on_hotkey():
                 )
                 return
             log.info("captured %d chars", len(text))
+            # Loading only after capture, for the API round-trip
+            ui(_show_loading)
             proofread_worker(text, original_clip, fg)
         except Exception as exc:
             log.exception("hotkey handler failed")
