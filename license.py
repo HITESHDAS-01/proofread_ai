@@ -21,6 +21,9 @@ _PREFIX = "APRO"
 _NONCE_LEN = 8
 _MAC_LEN = 8
 
+# Single key for all customers — share this one key everywhere.
+UNIVERSAL_KEY = "APRO-1FB1-7A0C-9C50-52C7-056B-5976-6070-2B89"
+
 
 def _mac(nonce: bytes) -> bytes:
     return hmac.new(_SECRET, nonce, hashlib.sha256).digest()[:_MAC_LEN]
@@ -46,8 +49,14 @@ def _parse(key: str) -> bytes | None:
         return None
 
 
+def _normalize_display(key: str) -> str:
+    return (key or "").strip().upper().replace(" ", "")
+
+
 def is_valid_license_key(key: str) -> bool:
     try:
+        if _normalize_display(key) == _normalize_display(UNIVERSAL_KEY):
+            return True
         parsed = _parse(key)
         if parsed is None:
             return False
