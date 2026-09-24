@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 APP_NAME = "AI Proofreader"
 APP_ID = "AIProofreader"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 DEFAULT_SETTINGS = {
     "hotkey": "ctrl+alt+z",
