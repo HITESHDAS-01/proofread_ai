@@ -284,7 +284,7 @@ class HomePage(ctk.CTkFrame):
 
     def _build(self):
         p = palette()
-        outer = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        outer = ctk.CTkFrame(self, fg_color="transparent")
         outer.pack(fill="both", expand=True, padx=10, pady=10)
 
         section_title(outer, "Dashboard", "Universal grammar assistant for every app")
