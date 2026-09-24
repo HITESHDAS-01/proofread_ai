@@ -1268,7 +1268,7 @@ class ActivationPage(ctk.CTkFrame):
 
 class MainWindow(ctk.CTk):
     def __init__(self, app_callbacks):
-        super().__init__(master=None)
+        super().__init__()
         self.app_callbacks = app_callbacks
         self.title("AI Proofreader")
         self.geometry("960x660")
