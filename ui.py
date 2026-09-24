@@ -1152,9 +1152,123 @@ def show_update_dialog(master, info: dict):
 ALL_PROVIDERS = list(PROVIDER_LABELS.keys())
 
 
+def is_app_activated() -> bool:
+    from license import is_valid_license_key
+
+    key = get("license_key") or ""
+    if not key:
+        return False
+    if not is_valid_license_key(key):
+        return False
+    return bool(get("activated", False))
+
+
+def activate_with_key(key: str) -> bool:
+    from license import is_valid_license_key
+
+    if not is_valid_license_key(key):
+        return False
+    settings = load_settings()
+    settings["activated"] = True
+    settings["license_key"] = key.strip().upper()
+    save_settings(settings)
+    return True
+
+
+class ActivationPage(ctk.CTkFrame):
+    def __init__(self, master, app):
+        super().__init__(master)
+        self.app = app
+        p = palette()
+        self.configure(fg_color=p["bg"])
+
+        wrap = ctk.CTkFrame(self, fg_color="transparent")
+        wrap.place(relx=0.5, rely=0.5, anchor="center")
+
+        card = Card(wrap, width=460, corner_radius=16)
+        card.pack(padx=20, pady=20)
+        card.pack_propagate(False)
+
+        ctk.CTkLabel(
+            card, text="✦", font=("Segoe UI", 34), text_color=ACCENT
+        ).pack(pady=(28, 6))
+        ctk.CTkLabel(
+            card,
+            text="Activate AI Proofreader",
+            font=("Segoe UI Semibold", 20),
+            text_color=p["text"],
+        ).pack(pady=(0, 6))
+        ctk.CTkLabel(
+            card,
+            text="Enter your access key to unlock proofreading.\nWorks offline — no account required.",
+            font=("Segoe UI", 13),
+            text_color=p["muted"],
+            justify="center",
+        ).pack(pady=(0, 18))
+
+        self.entry = ctk.CTkEntry(
+            card,
+            width=360,
+            height=44,
+            placeholder_text="APRO-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX",
+            font=("Consolas", 13),
+            corner_radius=10,
+            fg_color=p["card2"],
+            border_color=p["border"],
+            text_color=p["text"],
+        )
+        self.entry.pack(pady=(0, 10))
+        self.entry.bind("<Return>", lambda e: self._submit())
+
+        self.status = ctk.CTkLabel(
+            card, text="", font=("Segoe UI", 12), text_color=DANGER
+        )
+        self.status.pack(pady=(0, 12))
+
+        self.btn = ctk.CTkButton(
+            card,
+            text="Activate",
+            command=self._submit,
+            width=200,
+            height=42,
+            fg_color=ACCENT,
+            hover_color="#3a76e0",
+            corner_radius=10,
+            font=("Segoe UI Semibold", 14),
+        )
+        self.btn.pack(pady=(0, 8))
+
+        ctk.CTkButton(
+            card,
+            text="Quit",
+            command=self.app.app_callbacks["quit"],
+            width=200,
+            height=36,
+            fg_color="transparent",
+            border_width=1,
+            border_color=p["border"],
+            text_color=p["muted"],
+            hover_color=p["card2"],
+            corner_radius=10,
+        ).pack(pady=(0, 24))
+
+        self.entry.focus_set()
+
+    def _submit(self):
+        key = self.entry.get().strip()
+        if not key:
+            self.status.configure(text="Enter an access key.")
+            return
+        if not activate_with_key(key):
+            self.status.configure(text="Invalid access key. Check and try again.")
+            return
+        self.status.configure(text="")
+        self.app.on_activated()
+
+
 class MainWindow(ctk.CTk):
     def __init__(self, app_callbacks):
-        super().__init__()
+        super().__init__(master=None)
         self.app_callbacks = app_callbacks
         self.title("AI Proofreader")
         self.geometry("960x660")
@@ -1162,13 +1276,50 @@ class MainWindow(ctk.CTk):
         self._current_page = "home"
         self._sidebar = None
         self._rebuilding = False
+        self._activated = is_app_activated()
         apply_theme()
         p = palette()
         self.configure(fg_color=p["bg"])
 
+        if not self._activated:
+            self._build_activation_shell()
+        else:
+            self._build_shell()
+            first = not bool(get("onboarded", False))
+            self.show_page("guide" if first else "home")
+
+    def _build_activation_shell(self):
+        p = palette()
+        # Minimal shell: no sidebar nav until activated
+        self._sidebar = None
+        self.content = ctk.CTkFrame(self, corner_radius=0, fg_color=p["bg"])
+        self.content.pack(fill="both", expand=True)
+        self.content.grid_rowconfigure(0, weight=1)
+        self.content.grid_columnconfigure(0, weight=1)
+        self.pages = {}
+        self.home = None
+        self.activation = ActivationPage(self.content, self)
+        self.pages["activation"] = self.activation
+        self.activation.grid(row=0, column=0, sticky="nsew")
+        self.activation.tkraise()
+        self.nav_buttons = {}
+        self.protocol("WM_DELETE_WINDOW", self.app_callbacks["quit"])
+
+    def on_activated(self):
+        self._activated = True
+        # Rebuild full UI shell now that license is valid
+        try:
+            for child in self.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
         self._build_shell()
         first = not bool(get("onboarded", False))
         self.show_page("guide" if first else "home")
+        try:
+            self.app_callbacks.get("on_activated")()
+        except Exception:
+            pass
 
     def preview_theme(self, mode: str) -> None:
         pass
@@ -1259,6 +1410,12 @@ class MainWindow(ctk.CTk):
 
     def show_page(self, key: str):
         p = palette()
+        if not self._activated:
+            # Only activation page exists
+            page = self.pages.get("activation")
+            if page:
+                page.tkraise()
+            return
         page = self.pages.get(key)
         if not page:
             return
@@ -1303,4 +1460,5 @@ class MainWindow(ctk.CTk):
         self.deiconify()
         self.lift()
         self.focus_force()
-        self.show_page("home")
+        if self._activated:
+            self.show_page("home")

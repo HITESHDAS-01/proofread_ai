@@ -583,6 +583,22 @@ def on_hotkey():
     global _busy
     if not ENABLED or _busy:
         return
+    try:
+        from ui import is_app_activated
+
+        if not is_app_activated():
+            ui(
+                _show_error,
+                "AI Proofreader is not activated. Open the app and enter your access key.",
+            )
+            return
+    except Exception:
+        if not get("activated", False):
+            ui(
+                _show_error,
+                "AI Proofreader is not activated. Open the app and enter your access key.",
+            )
+            return
     if not available_providers():
         ui(
             _show_error,
@@ -748,10 +764,16 @@ def main():
     }
     _root = MainWindow(callbacks)
 
+    # Hotkey only fully useful after activation; still bind so we can prompt
     rebind_hotkey()
     start_tray()
     _root.after(50, _pump_ui)
-    log.info("AI Proofreader v%s running (hotkey=%s)", VERSION, get("hotkey"))
+    log.info(
+        "AI Proofreader v%s running (hotkey=%s activated=%s)",
+        VERSION,
+        get("hotkey"),
+        bool(get("activated", False)),
+    )
 
     if settings.get("auto_update", True):
         _root.after(4000, _background_update_check)

@@ -179,6 +179,72 @@ class TestLLM(ConfigTestCase):
         self.assertEqual(msg, "unknown provider")
 
 
+class TestLicense(unittest.TestCase):
+    def test_generate_and_validate(self):
+        from license import generate_license_key, is_valid_license_key
+
+        key = generate_license_key()
+        self.assertTrue(key.startswith("APRO-"))
+        self.assertTrue(is_valid_license_key(key))
+
+    def test_rejects_garbage(self):
+        from license import is_valid_license_key
+
+        self.assertFalse(is_valid_license_key(""))
+        self.assertFalse(is_valid_license_key("APRO-0000-0000"))
+        self.assertFalse(is_valid_license_key("hello world"))
+        self.assertFalse(is_valid_license_key("APRO-" + "A" * 32))
+
+    def test_rejects_tampered_nonce(self):
+        from license import generate_license_key, is_valid_license_key
+
+        key = generate_license_key()
+        body = key.replace("APRO-", "").replace("-", "")
+        flipped = body[:-1] + ("0" if body[-1] != "0" else "1")
+        groups = [flipped[i : i + 4] for i in range(0, len(flipped), 4)]
+        bad = "-".join(["APRO", *groups])
+        self.assertFalse(is_valid_license_key(bad))
+
+    def test_case_and_spacing_insensitive(self):
+        from license import generate_license_key, is_valid_license_key
+
+        key = generate_license_key()
+        self.assertTrue(is_valid_license_key(key.lower()))
+        self.assertTrue(is_valid_license_key("  " + key + "  "))
+
+    def test_generate_key_cli_module(self):
+        import generate_key  # noqa: F401
+
+        self.assertTrue(callable(generate_key.main))
+
+    def test_default_not_activated(self):
+        import config
+
+        self.assertFalse(config.DEFAULT_SETTINGS["activated"])
+        self.assertEqual(config.DEFAULT_SETTINGS["license_key"], "")
+
+    def test_settings_activation_roundtrip(self):
+        import importlib
+
+        import config
+
+        cfg = importlib.reload(config)
+        tmp = Path(tempfile.mkdtemp())
+        cfg.settings_file = lambda: tmp / "settings.json"
+        cfg._settings_cache = None
+        from license import generate_license_key
+
+        key = generate_license_key()
+        settings = cfg.load_settings()
+        settings["activated"] = True
+        settings["license_key"] = key
+        cfg.save_settings(settings)
+        cfg._settings_cache = None
+        loaded = cfg.load_settings()
+        self.assertTrue(loaded["activated"])
+        self.assertEqual(loaded["license_key"], key)
+
+
 class TestInstaller(unittest.TestCase):
     def test_iss_references_exe(self):
         iss = Path(__file__).resolve().parents[1] / "installer" / "AIProofreader.iss"

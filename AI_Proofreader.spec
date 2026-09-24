@@ -11,7 +11,7 @@ a = Analysis(
         + [(f, ".") for f in ("LICENSE", "PRIVACY.md")
            if __import__("pathlib").Path(f).exists()]
     ),
-    hiddenimports=["customtkinter"],
+    hiddenimports=["customtkinter", "license"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

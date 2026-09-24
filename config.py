@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 APP_NAME = "AI Proofreader"
 APP_ID = "AIProofreader"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 DEFAULT_SETTINGS = {
     "hotkey": "ctrl+alt+z",
@@ -19,6 +19,8 @@ DEFAULT_SETTINGS = {
     "onboarded": False,
     "auto_update": True,
     "update_repo": "HITESHDAS-01/proofread_ai",
+    "activated": False,
+    "license_key": "",
 }
 
 PROVIDER_LABELS = {
