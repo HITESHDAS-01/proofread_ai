@@ -6,6 +6,7 @@ import queue
 import sys
 import threading
 import time
+from ctypes import wintypes
 
 import keyboard
 import pyperclip
@@ -173,23 +174,98 @@ def _read_clipboard():
         user32.CloseClipboard()
 
 
-def _send_copy():
-    if sys.platform == "win32":
-        user32 = ctypes.windll.user32
-        VK_SHIFT, VK_CONTROL, VK_MENU = 0x10, 0x11, 0x12
-        deadline = time.time() + 0.6
-        while time.time() < deadline:
-            down = [
-                user32.GetAsyncKeyState(v) & 0x8000
-                for v in (VK_SHIFT, VK_CONTROL, VK_MENU, 0x5B, 0x5C)
-            ]
-            if not any(down):
-                break
-            time.sleep(0.02)
-        for vk in (VK_SHIFT, VK_MENU, 0x5B, 0x5C):
-            user32.keybd_event(vk, 0, 0x0002, 0)
-        time.sleep(0.05)
+def _send_copy(target_hwnd=None):
+    """Copy selection without relying only on synthetic Ctrl+C.
 
+    Word often ignores SendInput when a low-level keyboard hook (keyboard lib)
+    is active. Try WM_COPY on the real focused child first, then key events.
+    """
+    if sys.platform != "win32":
+        keyboard.send("ctrl+c")
+        return
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    # Wait for user modifiers from the hotkey to be released
+    VK_SHIFT, VK_CONTROL, VK_MENU = 0x10, 0x11, 0x12
+    deadline = time.time() + 0.6
+    while time.time() < deadline:
+        down = [
+            user32.GetAsyncKeyState(v) & 0x8000
+            for v in (VK_SHIFT, VK_CONTROL, VK_MENU, 0x5B, 0x5C)
+        ]
+        if not any(down):
+            break
+        time.sleep(0.02)
+    for vk in (VK_SHIFT, VK_MENU, 0x5B, 0x5C):
+        if user32.GetAsyncKeyState(vk) & 0x8000:
+            user32.keybd_event(vk, 0, 0x0002, 0)
+    time.sleep(0.05)
+
+    WM_COPY = 0x0301
+    copied = False
+
+    # Method 1: WM_COPY to the focused control inside the target app
+    focus_hwnd = None
+    try:
+        class GUITHREADINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_uint),
+                ("flags", ctypes.c_uint),
+                ("hwndActive", ctypes.c_void_p),
+                ("hwndFocus", ctypes.c_void_p),
+                ("hwndCapture", ctypes.c_void_p),
+                ("hwndMenuOwner", ctypes.c_void_p),
+                ("hwndMoveSize", ctypes.c_void_p),
+                ("hwndCaret", ctypes.c_void_p),
+                ("rcCaret", wintypes.RECT),
+            ]
+
+        gti = GUITHREADINFO()
+        gti.cbSize = ctypes.sizeof(GUITHREADINFO)
+        host = target_hwnd or user32.GetForegroundWindow()
+        tid = user32.GetWindowThreadProcessId(host, None) if host else 0
+        if tid and user32.GetGUIThreadInfo(tid, ctypes.byref(gti)):
+            focus_hwnd = gti.hwndFocus
+        if not focus_hwnd:
+            focus_hwnd = host
+        if focus_hwnd:
+            if user32.PostMessageW(focus_hwnd, WM_COPY, 0, 0):
+                copied = True
+                log.info("copy: WM_COPY posted to hwnd=%s", focus_hwnd)
+            # Attach + GetFocus as a second WM_COPY target
+            tid_cur = kernel32.GetCurrentThreadId()
+            attached = False
+            if tid and tid != tid_cur:
+                attached = bool(user32.AttachThreadInput(tid_cur, tid, True))
+            try:
+                f2 = user32.GetFocus()
+                if f2 and f2 != focus_hwnd:
+                    if user32.PostMessageW(f2, WM_COPY, 0, 0):
+                        copied = True
+                        log.info("copy: WM_COPY posted to GetFocus=%s", f2)
+            finally:
+                if attached:
+                    user32.AttachThreadInput(tid_cur, tid, False)
+    except Exception:
+        log.exception("copy: WM_COPY path failed")
+
+    # Method 2: keybd_event Ctrl+C (plain, no SendInput struct issues)
+    try:
+        user32.keybd_event(VK_CONTROL, 0, 0, 0)
+        user32.keybd_event(0x43, 0, 0, 0)
+        time.sleep(0.03)
+        user32.keybd_event(0x43, 0, 0x0002, 0)
+        user32.keybd_event(VK_CONTROL, 0, 0x0002, 0)
+        log.info("copy: keybd_event ctrl+c sent")
+    except Exception:
+        log.exception("copy: keybd_event failed")
+
+    time.sleep(0.08)
+
+    # Method 3: SendInput as extra belt
+    try:
         class KEYBDINPUT(ctypes.Structure):
             _fields_ = [
                 ("wVk", ctypes.c_ushort),
@@ -214,9 +290,10 @@ def _send_copy():
             INPUT(INPUT_KEYBOARD, ki=KEYBDINPUT(0x43, 0, KEYEVENTF_KEYUP, 0, 0)),
             INPUT(INPUT_KEYBOARD, ki=KEYBDINPUT(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0, 0)),
         )
-        user32.SendInput(4, ctypes.byref(inputs), ctypes.sizeof(INPUT))
-    else:
-        keyboard.send("ctrl+c")
+        sent = user32.SendInput(4, ctypes.byref(inputs), ctypes.sizeof(INPUT))
+        log.info("copy: SendInput returned %s copied_hint=%s", sent, copied)
+    except Exception:
+        log.exception("copy: SendInput failed")
 
 
 def _write_clipboard(text: str) -> bool:
@@ -315,17 +392,17 @@ def capture_selected_text(pre_fg=None):
             _get_foreground_title(actual_fg),
         )
 
-        # Send Ctrl+C when target has focus (or no target known)
+        # Send copy when target has focus (or no target known)
         if not fg or actual_fg == fg:
-            _send_copy()
+            _send_copy(fg)
         else:
             _set_foreground(fg)
             time.sleep(0.12)
             if _get_foreground() == fg:
-                _send_copy()
+                _send_copy(fg)
             else:
                 log.warning("cannot focus target; sending copy anyway")
-                _send_copy()
+                _send_copy(fg)
 
         wait = 2.0 if attempt == 0 else 1.5
         deadline = time.time() + wait
@@ -334,17 +411,24 @@ def capture_selected_text(pre_fg=None):
             seq = _clipboard_seq()
             if seq == seq0:
                 continue
-            time.sleep(0.1)
+            time.sleep(0.12)
             value = _read_clipboard()
             if value.strip():
                 if value.startswith("__AI_PR_CAPTURE_"):
                     seq0 = seq
                     continue
                 captured = value
+                log.info("copy: clipboard changed seq=%s len=%d", seq, len(value))
                 break
             seq0 = seq
         if captured:
             break
+        log.info(
+            "copy: no clipboard change attempt=%d seq0=%s now=%s",
+            attempt + 1,
+            seq0,
+            _clipboard_seq(),
+        )
         seq0 = _clipboard_seq()
         if fg:
             _set_foreground(fg)
