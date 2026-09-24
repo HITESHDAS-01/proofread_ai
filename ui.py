@@ -570,20 +570,7 @@ class SettingsPage(ctk.CTkFrame):
             gen, text="Auto-check for updates on launch",
             variable=self.auto_update_var, progress_color=ACCENT,
             font=("Segoe UI", 13), text_color=p["text"],
-        ).pack(anchor="w", padx=18, pady=(6, 12))
-
-        ctk.CTkLabel(gen, text="Update source (GitHub repo: owner/name)",
-                     font=("Segoe UI", 12), text_color=p["muted"]).pack(
-            anchor="w", padx=18, pady=(4, 4)
-        )
-        self.update_repo_var = ctk.StringVar(
-            value=str(settings.get("update_repo") or "")
-        )
-        ctk.CTkEntry(
-            gen, textvariable=self.update_repo_var, height=38, corner_radius=10,
-            fg_color=p["card2"], border_color=p["border"], text_color=p["text"],
-            placeholder_text="e.g. HITESHDAS-01/proofread_ai",
-        ).pack(fill="x", padx=18, pady=(0, 18))
+        ).pack(anchor="w", padx=18, pady=(6, 18))
 
         prov = Card(scroll)
         prov.pack(fill="x", pady=(0, 12))
@@ -749,7 +736,6 @@ class SettingsPage(ctk.CTkFrame):
         settings["auto_replace"] = bool(self.auto_var.get())
         settings["enabled"] = bool(self.enabled_var.get())
         settings["auto_update"] = bool(self.auto_update_var.get())
-        settings["update_repo"] = (self.update_repo_var.get() or "").strip().strip("/")
         settings["provider_order"] = self._ordered()
         settings["api_keys"] = {
             name: (var.get() or "").strip() for name, var in self.key_entries.items()
