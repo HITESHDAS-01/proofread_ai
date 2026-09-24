@@ -21,7 +21,8 @@ _PREFIX = "APRO"
 _NONCE_LEN = 8
 _MAC_LEN = 8
 
-# Single key for all customers — share this one key everywhere.
+# Owner/developer master key only — do NOT ship this as the customer key.
+# Customers get individual keys from: python generate_key.py
 UNIVERSAL_KEY = "APRO-1FB1-7A0C-9C50-52C7-056B-5976-6070-2B89"
 
 

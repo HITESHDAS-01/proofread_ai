@@ -187,7 +187,7 @@ class TestLicense(unittest.TestCase):
         self.assertTrue(key.startswith("APRO-"))
         self.assertTrue(is_valid_license_key(key))
 
-    def test_universal_key_always_valid(self):
+    def test_owner_master_key_always_valid(self):
         from license import UNIVERSAL_KEY, is_valid_license_key
 
         self.assertTrue(is_valid_license_key(UNIVERSAL_KEY))
