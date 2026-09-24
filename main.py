@@ -1,6 +1,7 @@
 import ctypes
 import logging
 import logging.handlers
+import os
 import queue
 import sys
 import threading
@@ -83,14 +84,40 @@ def _set_foreground(hwnd):
     if not hwnd or sys.platform != "win32":
         return
     user32 = ctypes.windll.user32
-    user32.SetForegroundWindow(hwnd)
-    user32.BringWindowToTop(hwnd)
+    kernel32 = ctypes.windll.kernel32
+    if user32.GetForegroundWindow() == hwnd:
+        return
+    fg = user32.GetForegroundWindow()
+    tid_fg = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+    tid_cur = kernel32.GetCurrentThreadId()
+    attached = False
+    if tid_fg and tid_fg != tid_cur:
+        attached = bool(user32.AttachThreadInput(tid_cur, tid_fg, True))
+    try:
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetFocus(hwnd)
+    finally:
+        if attached:
+            user32.AttachThreadInput(tid_cur, tid_fg, False)
+    time.sleep(0.08)
 
 
-def _clipboard_seq():
+def _wait_modifiers_up(timeout=0.7):
     if sys.platform != "win32":
-        return 0
-    return ctypes.windll.user32.GetClipboardSequenceNumber()
+        time.sleep(0.12)
+        return
+    user32 = ctypes.windll.user32
+    keys = (0x10, 0x11, 0x12, 0x5B, 0x5C)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not any(user32.GetAsyncKeyState(v) & 0x8000 for v in keys):
+            break
+        time.sleep(0.02)
+    for vk in keys:
+        if user32.GetAsyncKeyState(vk) & 0x8000:
+            user32.keybd_event(vk, 0, 0x0002, 0)
+    time.sleep(0.05)
 
 
 def _read_clipboard():
@@ -115,10 +142,9 @@ def _read_clipboard():
         if not ptr:
             return ""
         try:
-            text = ctypes.wstring_at(ptr)
+            return ctypes.wstring_at(ptr)
         finally:
             kernel32.GlobalUnlock(handle)
-        return text
     finally:
         user32.CloseClipboard()
 
@@ -169,47 +195,83 @@ def _send_copy():
         keyboard.send("ctrl+c")
 
 
-def capture_selected_text():
+def _write_clipboard(text: str) -> bool:
+    try:
+        pyperclip.copy(text)
+        if _read_clipboard() == text:
+            return True
+    except Exception:
+        pass
+    if sys.platform != "win32":
+        return False
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
+    if not user32.OpenClipboard(None):
+        return False
+    try:
+        user32.EmptyClipboard()
+        data = (text + "\0").encode("utf-16-le")
+        h = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+        if not h:
+            return False
+        ptr = kernel32.GlobalLock(h)
+        if not ptr:
+            kernel32.GlobalFree(h)
+            return False
+        ctypes.memmove(ptr, data, len(data))
+        kernel32.GlobalUnlock(h)
+        if not user32.SetClipboardData(CF_UNICODETEXT, h):
+            kernel32.GlobalFree(h)
+            return False
+        return True
+    finally:
+        user32.CloseClipboard()
+
+
+def capture_selected_text(pre_fg=None):
     original_clip = _read_clipboard()
-    fg = _get_foreground()
-    time.sleep(0.25)
+    fg = pre_fg or _get_foreground()
+    _wait_modifiers_up(0.75)
     if fg:
         _set_foreground(fg)
-        time.sleep(0.1)
-    seq0 = _clipboard_seq()
+    time.sleep(0.12)
+
     captured = ""
-    for attempt in range(3):
+    for attempt in range(4):
+        sentinel = f"__AI_PR_CAPTURE_{os.getpid()}_{time.time_ns()}__"
+        if not _write_clipboard(sentinel):
+            sentinel = None
+        time.sleep(0.06)
+        if fg and _get_foreground() != fg:
+            _set_foreground(fg)
+            time.sleep(0.1)
         _send_copy()
-        deadline = time.time() + 1.0
+        wait = 1.8 if attempt == 0 else 1.2
+        deadline = time.time() + wait
         while time.time() < deadline:
-            time.sleep(0.06)
-            seq = _clipboard_seq()
-            if seq == seq0:
-                continue
-            time.sleep(0.08)
+            time.sleep(0.05)
             value = _read_clipboard()
+            if not value:
+                continue
+            if sentinel is not None and value == sentinel:
+                continue
             if value.strip():
                 captured = value
                 break
         if captured:
             break
-        seq0 = _clipboard_seq()
-        time.sleep(0.15)
-        keyboard.send("ctrl+c")
-        deadline = time.time() + 1.0
-        while time.time() < deadline:
-            time.sleep(0.06)
-            if _clipboard_seq() != seq0:
-                time.sleep(0.08)
-                value = _read_clipboard()
-                if value.strip():
-                    captured = value
-                    break
-        if captured:
-            break
-        seq0 = _clipboard_seq()
-        time.sleep(0.12)
-    log.info("capture: len=%d seq_changed=%s", len(captured), _clipboard_seq() != seq0)
+        if fg:
+            _set_foreground(fg)
+            time.sleep(0.12)
+        _wait_modifiers_up(0.3)
+
+    log.info(
+        "capture: len=%d attempts_fg=%s",
+        len(captured),
+        bool(fg),
+    )
     return captured, original_clip, fg
 
 
@@ -334,15 +396,16 @@ def on_hotkey():
             "and add at least one key.",
         )
         return
+    pre_fg = _get_foreground()
     _busy = True
     ui(_show_loading)
 
     def run():
         global _busy
         try:
-            text, original_clip, fg = capture_selected_text()
+            text, original_clip, fg = capture_selected_text(pre_fg)
             if not text.strip():
-                log.info("no text captured")
+                log.info("no text captured (fg=%s)", bool(fg))
                 ui(
                     _show_error,
                     "No text captured. Select some text first, "

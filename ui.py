@@ -209,7 +209,6 @@ class LoadingPopup(ctk.CTkToplevel):
         self._bar.configure(mode="indeterminate", progress_color=ACCENT)
         self._bar.start(0.09)
         self._tick()
-        self.after(200, self.focus_force)
 
     def _tick(self):
         if not self.winfo_exists():
