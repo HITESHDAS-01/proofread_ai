@@ -80,27 +80,51 @@ def _get_foreground():
     return ctypes.windll.user32.GetForegroundWindow()
 
 
+def _clipboard_seq():
+    if sys.platform != "win32":
+        return 0
+    return ctypes.windll.user32.GetClipboardSequenceNumber()
+
+
 def _set_foreground(hwnd):
     if not hwnd or sys.platform != "win32":
-        return
+        return False
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
     if user32.GetForegroundWindow() == hwnd:
-        return
-    fg = user32.GetForegroundWindow()
-    tid_fg = user32.GetWindowThreadProcessId(fg, None) if fg else 0
-    tid_cur = kernel32.GetCurrentThreadId()
-    attached = False
-    if tid_fg and tid_fg != tid_cur:
-        attached = bool(user32.AttachThreadInput(tid_cur, tid_fg, True))
+        return True
+
+    # ALT trick unlocks SetForegroundWindow for this process
+    VK_MENU = 0x12
+    KEYEVENTF_KEYUP = 0x0002
+    user32.keybd_event(VK_MENU, 0, 0, 0)
     try:
-        user32.BringWindowToTop(hwnd)
-        user32.SetForegroundWindow(hwnd)
-        user32.SetFocus(hwnd)
+        fg = user32.GetForegroundWindow()
+        tid_fg = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        tid_cur = kernel32.GetCurrentThreadId()
+        attached = False
+        if tid_fg and tid_fg != tid_cur:
+            attached = bool(user32.AttachThreadInput(tid_cur, tid_fg, True))
+        try:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.SetActiveWindow(hwnd)
+            user32.SetFocus(hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(tid_cur, tid_fg, False)
     finally:
-        if attached:
-            user32.AttachThreadInput(tid_cur, tid_fg, False)
-    time.sleep(0.08)
+        user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+
+    for _ in range(12):
+        if user32.GetForegroundWindow() == hwnd:
+            time.sleep(0.06)
+            return True
+        time.sleep(0.03)
+        user32.SetForegroundWindow(hwnd)
+    ok = user32.GetForegroundWindow() == hwnd
+    time.sleep(0.06)
+    return bool(ok)
 
 
 def _wait_modifiers_up(timeout=0.7):
@@ -230,46 +254,92 @@ def _write_clipboard(text: str) -> bool:
         user32.CloseClipboard()
 
 
+def _is_our_window(hwnd) -> bool:
+    if not hwnd or sys.platform != "win32":
+        return True
+    pid = ctypes.c_ulong(0)
+    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value == os.getpid()
+
+
 def capture_selected_text(pre_fg=None):
     original_clip = _read_clipboard()
+    seq0 = _clipboard_seq()
     fg = pre_fg or _get_foreground()
-    _wait_modifiers_up(0.75)
-    if fg:
-        _set_foreground(fg)
-    time.sleep(0.12)
+    if _is_our_window(fg):
+        # Fallback: previous non-our window is unknown; still try restore later
+        log.warning("foreground was our window at capture start")
+
+    _wait_modifiers_up(0.7)
+    focused = False
+    if fg and not _is_our_window(fg):
+        focused = _set_foreground(fg)
+    time.sleep(0.1)
 
     captured = ""
+    attempts = 0
     for attempt in range(4):
-        sentinel = f"__AI_PR_CAPTURE_{os.getpid()}_{time.time_ns()}__"
-        if not _write_clipboard(sentinel):
-            sentinel = None
-        time.sleep(0.06)
-        if fg and _get_foreground() != fg:
+        attempts = attempt + 1
+        if fg and not _is_our_window(fg):
+            if _get_foreground() != fg:
+                focused = _set_foreground(fg)
+                time.sleep(0.08)
+            else:
+                focused = True
+
+        actual_fg = _get_foreground()
+        log.info(
+            "capture attempt=%d fg_match=%s our_window=%s",
+            attempt + 1,
+            actual_fg == fg,
+            _is_our_window(actual_fg),
+        )
+
+        # Only send Ctrl+C when target window actually has focus
+        if fg and actual_fg == fg:
+            _send_copy()
+        elif not fg:
+            _send_copy()
+        else:
+            # retry focus once more, then try anyway
             _set_foreground(fg)
             time.sleep(0.1)
-        _send_copy()
-        wait = 1.8 if attempt == 0 else 1.2
+            if _get_foreground() == fg:
+                _send_copy()
+            else:
+                time.sleep(0.15)
+                _wait_modifiers_up(0.25)
+                continue
+
+        wait = 2.0 if attempt == 0 else 1.5
         deadline = time.time() + wait
         while time.time() < deadline:
             time.sleep(0.05)
+            seq = _clipboard_seq()
+            if seq == seq0:
+                continue
+            time.sleep(0.1)
             value = _read_clipboard()
-            if not value:
-                continue
-            if sentinel is not None and value == sentinel:
-                continue
             if value.strip():
+                # Ignore leftover sentinel-looking junk from older builds
+                if value.startswith("__AI_PR_CAPTURE_"):
+                    seq0 = seq
+                    continue
                 captured = value
                 break
+            seq0 = seq
         if captured:
             break
-        if fg:
+        seq0 = _clipboard_seq()
+        if fg and not _is_our_window(fg):
             _set_foreground(fg)
-            time.sleep(0.12)
         _wait_modifiers_up(0.3)
 
     log.info(
-        "capture: len=%d attempts_fg=%s",
+        "capture: len=%d attempts=%d focused=%s fg=%s",
         len(captured),
+        attempts,
+        focused,
         bool(fg),
     )
     return captured, original_clip, fg
@@ -396,20 +466,27 @@ def on_hotkey():
             "and add at least one key.",
         )
         return
+    # Capture source window BEFORE any of our UI is created
     pre_fg = _get_foreground()
+    if _is_our_window(pre_fg):
+        pre_fg = None
+    log.info("hotkey: pre_fg=%s our=%s", pre_fg, _is_our_window(pre_fg))
     _busy = True
+    # Loading must never activate (see LoadingPopup WS_EX_NOACTIVATE)
     ui(_show_loading)
 
     def run():
         global _busy
         try:
+            # Small delay so loading window is mapped without stealing focus
+            time.sleep(0.05)
             text, original_clip, fg = capture_selected_text(pre_fg)
             if not text.strip():
                 log.info("no text captured (fg=%s)", bool(fg))
                 ui(
                     _show_error,
-                    "No text captured. Select some text first, "
-                    "then press the hotkey.",
+                    "No text captured. Keep the text selected and make sure "
+                    "the app window (Word/Notepad) is focused, then press the hotkey again.",
                 )
                 return
             log.info("captured %d chars", len(text))

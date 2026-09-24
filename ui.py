@@ -194,6 +194,8 @@ class LoadingPopup(ctk.CTkToplevel):
         self.attributes("-topmost", True)
         self.protocol("WM_DELETE_WINDOW", lambda: None)
         self._dots = 0
+        # Never steal focus from the source app during capture
+        self.after_idle(self._noactivate)
 
         card = Card(self)
         card.pack(fill="both", expand=True, padx=14, pady=14)
@@ -210,6 +212,25 @@ class LoadingPopup(ctk.CTkToplevel):
         self._bar.start(0.09)
         self._tick()
 
+    def _noactivate(self):
+        try:
+            import ctypes
+
+            hwnd = int(self.wm_frame(), 16)
+            if not hwnd:
+                return
+            GWL_EXSTYLE = -20
+            WS_EX_NOACTIVATE = 0x08000000
+            WS_EX_TOOLWINDOW = 0x00000080
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ctypes.windll.user32.SetWindowLongW(
+                hwnd,
+                GWL_EXSTYLE,
+                style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            )
+        except Exception:
+            pass
+
     def _tick(self):
         if not self.winfo_exists():
             return
@@ -223,7 +244,10 @@ class LoadingPopup(ctk.CTkToplevel):
                 self._bar.stop()
             except Exception:
                 pass
-            self.destroy()
+            try:
+                self.destroy()
+            except Exception:
+                pass
 
 
 def show_message(master, title, message, error=False):
