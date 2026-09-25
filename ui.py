@@ -428,7 +428,7 @@ GUIDE_STEPS = [
     {"n": "02", "title": "Press the hotkey",
      "body": "Hit Ctrl + Alt + Z (configurable in Settings). The app copies the selection automatically."},
     {"n": "03", "title": "AI fixes grammar & tone",
-     "body": "Free LLM providers correct grammar, sentence case, and professional tone — with automatic fallback."},
+      "body": "Free LLM providers correct grammar and tone in any language — with automatic fallback."},
     {"n": "04", "title": "Review & replace",
      "body": "A clean popup shows original vs corrected. Press Enter to Replace, or Copy / Cancel."},
     {"n": "05", "title": "Setup — Get a free API key",
