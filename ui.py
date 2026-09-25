@@ -266,10 +266,8 @@ class TranslateControl:
 class ResultOverlay(ctk.CTkToplevel):
     """Compact floating toolbar shown near the cursor after a proofread.
 
-    Buttons: Replace / Copy / Ignore. Auto-dismisses after ~15s.
+    Buttons: Replace / Copy / Ignore. Stays open until the user acts.
     """
-
-    AUTO_CLOSE_MS = 15000
 
     def __init__(self, master, original, corrected, on_replace, on_copy,
                  provider="", on_translate=None):
@@ -306,11 +304,7 @@ class ResultOverlay(ctk.CTkToplevel):
         self.box = box
 
         if on_translate:
-            def wrapped_translate(lang, done, _inner=on_translate):
-                self._cancel_auto_close()
-                _inner(lang, done)
-
-            self.translate_ctl = TranslateControl(self, self, wrapped_translate, width=132)
+            self.translate_ctl = TranslateControl(self, self, on_translate, width=132)
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(fill="x", padx=12, pady=(0, 10))
@@ -339,7 +333,6 @@ class ResultOverlay(ctk.CTkToplevel):
 
         self._place_near_cursor()
         self.after_idle(self.focus_force)
-        self._auto_close = self.after(self.AUTO_CLOSE_MS, self._maybe_close)
 
     def _place_near_cursor(self):
         try:
@@ -366,31 +359,15 @@ class ResultOverlay(ctk.CTkToplevel):
         except Exception:
             self.geometry(f"+{x}+{y}")
 
-    def _maybe_close(self):
-        try:
-            if self.winfo_exists():
-                self.destroy()
-        except Exception:
-            pass
-
-    def _cancel_auto_close(self):
-        try:
-            self.after_cancel(self._auto_close)
-            self._auto_close = None
-        except Exception:
-            pass
-
     def _replace(self):
         cb = self._on_replace
         text = self.corrected
-        self._cancel_auto_close()
         self.destroy()
         cb(text)
 
     def _copy(self):
         cb = self._on_copy
         text = self.corrected
-        self._cancel_auto_close()
         self.destroy()
         cb(text)
 
