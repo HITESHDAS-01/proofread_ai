@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 APP_NAME = "AI Proofreader"
 APP_ID = "AIProofreader"
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 
 DEFAULT_SETTINGS = {
     "hotkey": "ctrl+alt+z",
@@ -56,6 +56,30 @@ PROVIDER_URLS = {
     "openai": "https://platform.openai.com/api-keys",
     "claude": "https://console.anthropic.com/settings/keys",
 }
+
+# All 22 Eighth-Schedule Indian languages + English, then famous world languages
+TRANSLATE_LANG_GROUPS = [
+    (
+        "Indian languages",
+        [
+            "Hindi", "Bengali", "Tamil", "Telugu", "Marathi", "Urdu",
+            "Gujarati", "Kannada", "Malayalam", "Odia", "Punjabi",
+            "Assamese", "Maithili", "Sanskrit", "Sindhi", "Kashmiri",
+            "Konkani", "Manipuri", "Nepali", "Dogri", "Bodo", "Santali",
+            "English",
+        ],
+    ),
+    (
+        "World languages",
+        [
+            "Spanish", "French", "German", "Portuguese", "Italian",
+            "Russian", "Japanese", "Chinese", "Korean", "Arabic", "Turkish",
+        ],
+    ),
+]
+TRANSLATE_LANGS = [
+    lang for _, langs in TRANSLATE_LANG_GROUPS for lang in langs
+]
 
 TONES = {
     "professional": (

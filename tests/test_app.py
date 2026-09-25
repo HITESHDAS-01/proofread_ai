@@ -528,5 +528,32 @@ class TestSmartOrder(ConfigTestCase):
         self.assertIn("groq", loaded["provider_stats"])
 
 
+class TestTranslateLanguages(ConfigTestCase):
+    def test_all_scheduled_indian_languages_present(self):
+        scheduled = [
+            "Assamese", "Bengali", "Bodo", "Dogri", "Gujarati", "Hindi",
+            "Kannada", "Kashmiri", "Konkani", "Maithili", "Malayalam",
+            "Manipuri", "Marathi", "Nepali", "Odia", "Punjabi", "Sanskrit",
+            "Santali", "Sindhi", "Tamil", "Telugu", "Urdu",
+        ]
+        indian = dict(self.config.TRANSLATE_LANG_GROUPS)["Indian languages"]
+        for lang in scheduled:
+            self.assertIn(lang, indian)
+        self.assertIn("English", indian)
+
+    def test_only_famous_world_languages(self):
+        world = dict(self.config.TRANSLATE_LANG_GROUPS)["World languages"]
+        expected = {
+            "Spanish", "French", "German", "Portuguese", "Italian",
+            "Russian", "Japanese", "Chinese", "Korean", "Arabic", "Turkish",
+        }
+        self.assertEqual(set(world), expected)
+        self.assertNotIn("Dutch", self.config.TRANSLATE_LANGS)
+
+    def test_no_duplicates_across_groups(self):
+        langs = self.config.TRANSLATE_LANGS
+        self.assertEqual(len(langs), len(set(langs)))
+
+
 if __name__ == "__main__":
     unittest.main()

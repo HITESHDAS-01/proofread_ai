@@ -7,6 +7,8 @@ from config import (
     PROVIDER_LABELS,
     PROVIDER_URLS,
     TONES,
+    TRANSLATE_LANG_GROUPS,
+    TRANSLATE_LANGS,
     VERSION,
     API_KEYS,
     get,
@@ -90,13 +92,6 @@ def badge(parent, text, color=ACCENT):
         padx=2,
     )
     return b
-
-
-TRANSLATE_LANGS = [
-    "Hindi", "Bengali", "Urdu", "Spanish", "French", "German", "Italian",
-    "Portuguese", "Russian", "Japanese", "Chinese", "Korean", "Arabic",
-    "Turkish", "Dutch",
-]
 
 
 class Popup(ctk.CTkToplevel):
@@ -210,45 +205,149 @@ class Popup(ctk.CTkToplevel):
 
 
 class TranslateControl:
-    """'Translate ▾' dropdown + status; owner must implement _apply_translation(new)."""
+    """'Translate ▾' button opening a scrollable language picker.
+
+    Calls owner._apply_translation(new) via on_translate(lang, done).
+    """
 
     PLACEHOLDER = "Translate ▾"
 
     def __init__(self, parent, owner, on_translate, width=150):
         self.owner = owner
         self.on_translate = on_translate
+        self._menu_win = None
         p = palette()
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=18, pady=(0, 6))
         ctk.CTkLabel(
             row, text="Translate:", font=("Segoe UI", 12), text_color=p["muted"]
         ).pack(side="left")
-        self.var = ctk.StringVar(value=self.PLACEHOLDER)
-        self.menu = ctk.CTkOptionMenu(
-            row, variable=self.var,
-            values=[self.PLACEHOLDER] + TRANSLATE_LANGS,
-            width=width, height=30, corner_radius=8, fg_color=p["card2"],
-            button_color=p["border"], button_hover_color=p["sidebar_hover"],
-            text_color=p["text"], font=("Segoe UI", 12), command=self._select,
+        self.btn = ctk.CTkButton(
+            row, text=self.PLACEHOLDER, width=width, height=30, corner_radius=8,
+            fg_color=p["card2"], border_width=1, border_color=p["border"],
+            text_color=p["text"], hover_color=p["sidebar_hover"],
+            font=("Segoe UI", 12), command=self._toggle_menu,
         )
-        self.menu.pack(side="left", padx=(8, 8))
+        self.btn.pack(side="left", padx=(8, 8))
         self.status = ctk.CTkLabel(
             row, text="", font=("Segoe UI", 11), text_color=p["muted"]
         )
         self.status.pack(side="left")
 
+    # --- picker menu ---
+    def _toggle_menu(self):
+        if self._menu_win is not None:
+            self._close_menu()
+            return
+        p = palette()
+        win = ctk.CTkToplevel(self.btn)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(fg_color=p["card"])
+        self._menu_win = win
+
+        header = ctk.CTkFrame(win, fg_color="transparent")
+        header.pack(fill="x", padx=8, pady=(6, 2))
+        ctk.CTkLabel(
+            header, text="Translate to", font=("Segoe UI Semibold", 12),
+            text_color=p["text"],
+        ).pack(side="left", padx=4)
+        ctk.CTkButton(
+            header, text="✕", width=26, height=24, corner_radius=6,
+            fg_color="transparent", hover_color=p["card2"],
+            text_color=p["muted"], command=self._close_menu,
+        ).pack(side="right")
+
+        height = 340
+        scroll = ctk.CTkScrollableFrame(
+            win, width=196, height=height, fg_color="transparent",
+            label_text="", scrollbar_button_color=p["border"],
+        )
+        scroll.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+
+        for group_name, langs in TRANSLATE_LANG_GROUPS:
+            ctk.CTkLabel(
+                scroll, text=group_name.upper(), anchor="w",
+                font=("Segoe UI", 10), text_color=p["muted"],
+            ).pack(fill="x", padx=6, pady=(6, 2))
+            for lang in langs:
+                ctk.CTkButton(
+                    scroll, text=lang, anchor="w", height=28, corner_radius=6,
+                    fg_color="transparent", hover_color=p["sidebar_hover"],
+                    text_color=p["text"], font=("Segoe UI", 12),
+                    command=lambda l=lang: self._pick(l),
+                ).pack(fill="x", padx=2, pady=1)
+
+        self._position_menu()
+        win.bind("<Escape>", lambda e: self._close_menu())
+        win.after(60, self._grab_and_close_on_focus_out)
+
+    def _position_menu(self):
+        win = self._menu_win
+        try:
+            win.update_idletasks()
+            x = self.btn.winfo_rootx()
+            y = self.btn.winfo_rooty() + self.btn.winfo_height() + 4
+            w = win.winfo_reqwidth() or 210
+            h = win.winfo_reqheight() or 360
+            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+            if x + w > sw:
+                x = max(4, sw - w - 6)
+            if y + h > sh:
+                y = max(4, self.btn.winfo_rooty() - h - 4)
+            win.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+    def _grab_and_close_on_focus_out(self):
+        win = self._menu_win
+        if win is None:
+            return
+        try:
+            win.focus_force()
+            win.bind(
+                "<FocusOut>",
+                lambda e: self._root_after_close_check(),
+            )
+        except Exception:
+            pass
+
+    def _root_after_close_check(self):
+        # Close only if focus really left the menu (not a transient glitch)
+        win = self._menu_win
+        if win is None:
+            return
+        try:
+            if not win.focus_get():
+                self._close_menu()
+        except Exception:
+            self._close_menu()
+
+    def _close_menu(self):
+        win = self._menu_win
+        self._menu_win = None
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+    def _pick(self, lang):
+        self._close_menu()
+        self._select(lang)
+
+    # --- translation run ---
     def _select(self, choice):
-        if choice == self.PLACEHOLDER:
+        if not choice or choice == self.PLACEHOLDER:
             return
         lang = choice
-        self.var.set(self.PLACEHOLDER)
-        self.menu.configure(state="disabled")
+        self.btn.configure(state="disabled")
         self.status.configure(text=f"Translating to {lang}…", text_color=ACCENT)
         self.on_translate(lang, self._done)
 
     def _done(self, new_text, err=None):
         try:
-            self.menu.configure(state="normal")
+            self.btn.configure(state="normal")
         except Exception:
             pass
         if err or not new_text:
