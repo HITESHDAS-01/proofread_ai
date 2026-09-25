@@ -2,7 +2,7 @@
 ; Build: iscc installer\AIProofreader.iss  (after pyinstaller build)
 
 #define MyAppName "AI Proofreader"
-#define MyAppVersion "1.0.8"
+#define MyAppVersion "1.0.9"
 #define MyAppPublisher "Pranjit Das"
 #define MyAppExeName "AI_Proofreader.exe"
 

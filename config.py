@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 APP_NAME = "AI Proofreader"
 APP_ID = "AIProofreader"
-VERSION = "1.0.8"
+VERSION = "1.0.9"
 
 DEFAULT_SETTINGS = {
     "hotkey": "ctrl+alt+z",
@@ -18,7 +18,7 @@ DEFAULT_SETTINGS = {
     "max_history": 100,
     "onboarded": False,
     "auto_update": True,
-    "update_repo": "HITESHDAS-01/proofread_ai",
+    "update_repo": "HITESHDAS-01/ai-proofreader-releases",
     "activated": False,
     "license_key": "",
     "tone": "professional",
@@ -268,6 +268,8 @@ def load_settings() -> dict:
         merged["smart_order"] = True
     if not isinstance(merged.get("provider_stats"), dict):
         merged["provider_stats"] = {}
+    if merged.get("update_repo") == "HITESHDAS-01/proofread_ai":
+        merged["update_repo"] = DEFAULT_SETTINGS["update_repo"]
     _settings_cache = merged
     return dict(merged)
 

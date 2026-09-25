@@ -322,11 +322,23 @@ class TestUpdater(ConfigTestCase):
     def test_default_update_repo(self):
         self.assertEqual(
             self.config.DEFAULT_SETTINGS["update_repo"],
-            "HITESHDAS-01/proofread_ai",
+            "HITESHDAS-01/ai-proofreader-releases",
         )
         self.assertEqual(
             self.updater.DEFAULT_UPDATE_REPO,
-            "HITESHDAS-01/proofread_ai",
+            "HITESHDAS-01/ai-proofreader-releases",
+        )
+
+    def test_update_repo_migration_from_private_repo(self):
+        self.config.settings_file().write_text(
+            json.dumps({**self.config.DEFAULT_SETTINGS,
+                        "update_repo": "HITESHDAS-01/proofread_ai"}),
+            encoding="utf-8",
+        )
+        self.config._settings_cache = None
+        self.assertEqual(
+            self.config.load_settings()["update_repo"],
+            "HITESHDAS-01/ai-proofreader-releases",
         )
 
     def test_default_auto_update_enabled(self):

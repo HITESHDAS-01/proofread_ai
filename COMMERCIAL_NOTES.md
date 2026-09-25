@@ -20,12 +20,27 @@
 - [ ] Optional: install Inno Setup and run `iscc installer\AIProofreader.iss`
 
 ## Auto-update flow
-1. Default repo: **HITESHDAS-01/proofread_ai** (`config.py` + `updater.py`)
+1. Default repo: **HITESHDAS-01/ai-proofreader-releases** (`config.py` + `updater.py`)
+   - Source repo `HITESHDAS-01/proofread_ai` stays **private**; public downloads live in the
+     releases repo (created 2026-09-25, has README + LICENSE stub + mirrored releases)
+   - `load_settings()` migrates old `update_repo` values automatically
 2. Or override **Settings → Update source**
-3. On launch (after ~4s) app hits GitHub `releases/latest`
+3. On launch (after ~4s) app hits GitHub `releases/latest` (unauthenticated API)
 4. If newer tag → dialog → download `.exe` → bat waits for exit → replace → restart
 5. Needs a `.exe` asset on the release (CI already uploads it)
 6. Code signing strongly recommended so SmartScreen doesn't scare users mid-update
+
+## Release repos & CI publishing
+- CI (`build.yml`) publishes releases to **both** repos on tag push:
+  - source repo via `GITHUB_TOKEN`
+  - public releases repo via `secrets.RELEASES_TOKEN`
+- `RELEASES_TOKEN` = fine-grained PAT, single repo `ai-proofreader-releases`,
+  Contents: Read & write → add with `gh secret set RELEASES_TOKEN`.
+  Until it exists, CI skips the public-repo step; mirror releases manually with:
+  `gh release create vTAG --repo HITESHDAS-01/ai-proofreader-releases --title vTAG --notes "..." dist/AI_Proofreader.exe LICENSE PRIVACY.md`
+- `release: published` trigger removed — manual releases are no longer rebuilt/clobbered by CI
+- CI builds (Python 3.11) are the slim ~17.5MB exes; local builds match after adding
+  `excludes=["numpy", ...]` to `AI_Proofreader.spec` (numpy came from a Pillow hook, unused)
 
 ## Publish updates
 ```bash

@@ -15,7 +15,7 @@ from config import VERSION, get, is_frozen
 log = logging.getLogger(__name__)
 
 # Default GitHub repo for auto-updates (owner/name)
-DEFAULT_UPDATE_REPO = "HITESHDAS-01/proofread_ai"
+DEFAULT_UPDATE_REPO = "HITESHDAS-01/ai-proofreader-releases"
 
 
 def current_version() -> str:
