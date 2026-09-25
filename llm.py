@@ -8,7 +8,10 @@ from config import (
     MAX_RETRIES,
     REQUEST_TIMEOUT,
     SYSTEM_PROMPT,
+    build_system_prompt,
     get,
+    load_settings,
+    save_settings,
 )
 
 log = logging.getLogger(__name__)
@@ -155,6 +158,58 @@ def available_providers(order=None):
     return [name for name in order if name in PROVIDERS and API_KEYS.get(name)]
 
 
+def _provider_stats() -> dict:
+    stats = get("provider_stats", {}) or {}
+    return stats if isinstance(stats, dict) else {}
+
+
+def record_provider_result(name: str, elapsed: float | None, ok: bool) -> None:
+    """Persist per-provider latency/failure stats for smart ordering."""
+    try:
+        stats = dict(_provider_stats())
+        entry = dict(stats.get(name) or {"avg": 0.0, "ok": 0, "fail": 0})
+        entry["ok"] = int(entry.get("ok", 0)) + (1 if ok else 0)
+        entry["fail"] = int(entry.get("fail", 0)) + (0 if ok else 1)
+        if ok and elapsed is not None:
+            avg = float(entry.get("avg", 0.0) or 0.0)
+            n = int(entry.get("ok", 1))
+            # EMA-ish running average
+            entry["avg"] = round(avg + (elapsed - avg) / max(1, n), 3)
+        stats[name] = entry
+        settings = load_settings()
+        settings["provider_stats"] = stats
+        save_settings(settings)
+    except Exception:
+        log.debug("record_provider_result failed", exc_info=True)
+
+
+def smart_sort_order(order: list) -> list:
+    """Stable-sort providers fastest-first; failures sink; user order breaks ties.
+
+    - untested providers get a neutral 1.0s score (stay near their user position)
+    - providers that never succeeded but failed at least once sink to the bottom
+    - disabled via the smart_order setting
+    """
+    if not get("smart_order", True):
+        return list(order)
+    stats = _provider_stats()
+
+    def key(item):
+        idx, name = item
+        entry = stats.get(name) or {}
+        ok = int(entry.get("ok", 0) or 0)
+        fail = int(entry.get("fail", 0) or 0)
+        if ok == 0 and fail > 0:
+            latency = 999.0
+        elif ok == 0:
+            latency = 1.0
+        else:
+            latency = float(entry.get("avg", 1.0) or 1.0)
+        return (latency, idx)
+
+    return [name for _, name in sorted(enumerate(order), key=key)]
+
+
 def test_provider(name: str) -> tuple:
     fn = PROVIDERS.get(name)
     if fn is None:
@@ -170,9 +225,11 @@ def test_provider(name: str) -> tuple:
         return False, str(exc)
 
 
-def check_text(text, system_prompt=SYSTEM_PROMPT):
+def check_text(text, system_prompt=None):
     global LAST_PROVIDER
-    order = get("provider_order")
+    if not system_prompt:
+        system_prompt = build_system_prompt()
+    order = smart_sort_order(get("provider_order"))
     errors = []
     tried = False
     for name in order:
@@ -185,14 +242,17 @@ def check_text(text, system_prompt=SYSTEM_PROMPT):
             continue
         tried = True
         log.info("trying provider: %s", name)
+        t0 = time.time()
         try:
             result = fn(text, system_prompt)
             if not result:
                 raise ProviderError("empty response")
+            record_provider_result(name, time.time() - t0, True)
             LAST_PROVIDER = name
-            log.info("provider %s succeeded", name)
+            log.info("provider %s succeeded in %.2fs", name, time.time() - t0)
             return result
         except Exception as exc:
+            record_provider_result(name, None, False)
             log.warning("provider %s failed: %s", name, exc)
             errors.append(f"{name}: {exc}")
     if not tried:

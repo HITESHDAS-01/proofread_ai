@@ -6,6 +6,7 @@ import history as history_store
 from config import (
     PROVIDER_LABELS,
     PROVIDER_URLS,
+    TONES,
     VERSION,
     API_KEYS,
     get,
@@ -179,6 +180,125 @@ class Popup(ctk.CTkToplevel):
 
     def _copy(self):
         cb = self._on_copy
+        self.destroy()
+        cb()
+
+
+class ResultOverlay(ctk.CTkToplevel):
+    """Compact floating toolbar shown near the cursor after a proofread.
+
+    Buttons: Replace / Copy / Ignore. Auto-dismisses after ~15s.
+    """
+
+    AUTO_CLOSE_MS = 15000
+
+    def __init__(self, master, original, corrected, on_replace, on_copy, provider=""):
+        super().__init__(master)
+        p = palette()
+        self.overrideredirect(True)
+        self.configure(fg_color=p["card"])
+        self.attributes("-topmost", True)
+        self._on_replace = on_replace
+        self._on_copy = on_copy
+
+        preview = corrected if len(corrected) <= 240 else corrected[:240] + "…"
+
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=12, pady=(10, 2))
+        ctk.CTkLabel(
+            header, text="✦ Proofread", font=("Segoe UI Semibold", 12),
+            text_color=ACCENT,
+        ).pack(side="left")
+        if provider:
+            badge(header, PROVIDER_LABELS.get(provider, provider), ACCENT).pack(
+                side="right"
+            )
+
+        box = ctk.CTkTextbox(
+            self, height=64, width=340, wrap="word", fg_color=p["card2"],
+            border_width=1, border_color=p["border"], text_color=p["text"],
+            font=("Segoe UI", 12),
+        )
+        box.pack(fill="x", padx=12, pady=(4, 8))
+        box.insert("1.0", preview)
+        box.configure(state="disabled")
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=12, pady=(0, 10))
+        ctk.CTkButton(
+            btns, text="Replace", command=self._replace, width=110, height=34,
+            fg_color=ACCENT, hover_color="#3a76e0", corner_radius=8,
+            font=("Segoe UI Semibold", 12),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            btns, text="Copy", command=self._copy, width=80, height=34,
+            fg_color=p["card2"], hover_color=p["border"], border_width=1,
+            border_color=p["border"], text_color=p["text"], corner_radius=8,
+        ).pack(side="left", padx=6)
+        ctk.CTkButton(
+            btns, text="Ignore", command=self.destroy, width=80, height=34,
+            fg_color="transparent", hover_color=p["border"], border_width=1,
+            border_color=p["border"], text_color=p["muted"], corner_radius=8,
+        ).pack(side="left", padx=6)
+        ctk.CTkLabel(
+            btns, text="Enter=Replace · Esc=Ignore",
+            font=("Segoe UI", 10), text_color=p["muted"],
+        ).pack(side="right")
+
+        self.bind("<Return>", lambda e: self._replace())
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self._place_near_cursor()
+        self.after_idle(self.focus_force)
+        self._auto_close = self.after(self.AUTO_CLOSE_MS, self._maybe_close)
+
+    def _place_near_cursor(self):
+        try:
+            from ctypes import wintypes
+            import ctypes
+
+            pt = wintypes.POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            x, y = pt.x + 16, pt.y + 16
+        except Exception:
+            pt = None
+            x, y = 200, 200
+        try:
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            self.update_idletasks()
+            w = self.winfo_reqwidth() or 380
+            h = self.winfo_reqheight() or 160
+            if x + w > sw:
+                x = max(4, (pt.x if pt else 200) - w - 16)
+            if y + h > sh:
+                y = max(4, (pt.y if pt else 200) - h - 16)
+            self.geometry(f"+{x}+{y}")
+        except Exception:
+            self.geometry(f"+{x}+{y}")
+
+    def _maybe_close(self):
+        try:
+            if self.winfo_exists():
+                self.destroy()
+        except Exception:
+            pass
+
+    def _replace(self):
+        cb = self._on_replace
+        try:
+            self.after_cancel(self._auto_close)
+        except Exception:
+            pass
+        self.destroy()
+        cb()
+
+    def _copy(self):
+        cb = self._on_copy
+        try:
+            self.after_cancel(self._auto_close)
+        except Exception:
+            pass
         self.destroy()
         cb()
 
@@ -596,7 +716,53 @@ class SettingsPage(ctk.CTkFrame):
             gen, text="Auto-check for updates on launch",
             variable=self.auto_update_var, progress_color=ACCENT,
             font=("Segoe UI", 13), text_color=p["text"],
-        ).pack(anchor="w", padx=18, pady=(6, 18))
+        ).pack(anchor="w", padx=18, pady=(6, 10))
+
+        ctk.CTkLabel(gen, text="Proofreading", font=("Segoe UI Semibold", 14),
+                     text_color=p["text"]).pack(anchor="w", padx=18, pady=(4, 4))
+
+        field_label(gen, "Tone preset")
+        self.tone_var = ctk.StringVar(
+            value=settings.get("tone", "professional") if settings.get("tone", "professional") in TONES else "professional"
+        )
+        tone_labels = {k: k.capitalize() for k in TONES}
+        self._tone_labels = tone_labels
+        ctk.CTkOptionMenu(
+            gen, variable=self.tone_var, values=list(tone_labels.values()),
+            height=36, corner_radius=10, fg_color=p["card2"],
+            button_color=p["border"], button_hover_color=p["sidebar_hover"],
+            text_color=p["text"], font=("Segoe UI", 13),
+        ).pack(fill="x", padx=18, pady=(0, 4))
+
+        field_label(gen, "Translate to (optional)")
+        self.translate_var = ctk.StringVar(value=str(settings.get("translate_to", "") or ""))
+        ctk.CTkEntry(
+            gen, textvariable=self.translate_var, height=36, corner_radius=10,
+            fg_color=p["card2"], border_color=p["border"], text_color=p["text"],
+            placeholder_text="e.g. Hindi, Spanish — leave blank to keep original language",
+        ).pack(fill="x", padx=18, pady=(0, 4))
+
+        field_label(gen, "Never change these words (comma-separated)")
+        self.ignore_var = ctk.StringVar(
+            value=", ".join(settings.get("ignore_words") or [])
+        )
+        ctk.CTkEntry(
+            gen, textvariable=self.ignore_var, height=36, corner_radius=10,
+            fg_color=p["card2"], border_color=p["border"], text_color=p["text"],
+            placeholder_text="e.g. Pranjit, Groq, myBrand",
+        ).pack(fill="x", padx=18, pady=(0, 4))
+
+        field_label(gen, "Result display")
+        self.result_ui_var = ctk.StringVar(
+            value="Compact overlay" if settings.get("result_ui", "overlay") != "popup" else "Full preview window"
+        )
+        ctk.CTkOptionMenu(
+            gen, variable=self.result_ui_var,
+            values=["Compact overlay", "Full preview window"],
+            height=36, corner_radius=10, fg_color=p["card2"],
+            button_color=p["border"], button_hover_color=p["sidebar_hover"],
+            text_color=p["text"], font=("Segoe UI", 13),
+        ).pack(fill="x", padx=18, pady=(0, 18))
 
         prov = Card(scroll)
         prov.pack(fill="x", pady=(0, 12))
@@ -604,8 +770,15 @@ class SettingsPage(ctk.CTkFrame):
                      text_color=p["text"]).pack(anchor="w", padx=18, pady=(16, 4))
         ctk.CTkLabel(prov, text="Fallback order — first with a key wins",
                      font=("Segoe UI", 12), text_color=p["muted"]).pack(
-            anchor="w", padx=18, pady=(0, 8)
+            anchor="w", padx=18, pady=(0, 6)
         )
+
+        self.smart_order_var = ctk.BooleanVar(value=bool(settings.get("smart_order", True)))
+        ctk.CTkSwitch(
+            prov, text="Smart order — try fastest provider first, skip recent failures",
+            variable=self.smart_order_var, progress_color=ACCENT,
+            font=("Segoe UI", 13), text_color=p["text"],
+        ).pack(anchor="w", padx=18, pady=(0, 10))
 
         list_row = ctk.CTkFrame(prov, fg_color="transparent")
         list_row.pack(fill="x", padx=18, pady=(0, 12))
@@ -645,6 +818,8 @@ class SettingsPage(ctk.CTkFrame):
         ).pack(anchor="w", padx=18, pady=(0, 8))
 
         self.key_entries = {}
+        stats_map = settings.get("provider_stats") or {}
+        self.stats_labels = {}
         for name in ALL_PROVIDERS:
             row = ctk.CTkFrame(prov, fg_color=p["card2"], corner_radius=10,
                                border_width=1, border_color=p["border"])
@@ -688,7 +863,23 @@ class SettingsPage(ctk.CTkFrame):
                 row, text="Test", width=50, height=34, corner_radius=8,
                 fg_color=ACCENT, hover_color="#3a76e0",
                 command=lambda n=name: self._test(n),
-            ).pack(side="left", padx=(0, 10), pady=8)
+            ).pack(side="left", padx=(0, 6), pady=8)
+            entry_data = stats_map.get(name) or {}
+            if entry_data.get("ok"):
+                stat_txt = f"avg {float(entry_data.get('avg', 0) or 0):.1f}s"
+                stat_color = SUCCESS
+            elif entry_data.get("fail"):
+                stat_txt = "failing"
+                stat_color = DANGER
+            else:
+                stat_txt = "—"
+                stat_color = p["muted"]
+            stat_lbl = ctk.CTkLabel(
+                row, text=stat_txt, width=64, anchor="e",
+                font=("Segoe UI", 11), text_color=stat_color,
+            )
+            stat_lbl.pack(side="left", padx=(0, 8), pady=8)
+            self.stats_labels[name] = stat_lbl
 
         self.test_status = ctk.CTkLabel(
             prov, text="", wraplength=520, justify="left",
@@ -766,6 +957,17 @@ class SettingsPage(ctk.CTkFrame):
         settings["api_keys"] = {
             name: (var.get() or "").strip() for name, var in self.key_entries.items()
         }
+        tone_label = self.tone_var.get()
+        inv = {v: k for k, v in self._tone_labels.items()}
+        settings["tone"] = inv.get(tone_label, "professional")
+        settings["translate_to"] = (self.translate_var.get() or "").strip()
+        settings["ignore_words"] = [
+            w.strip() for w in (self.ignore_var.get() or "").split(",") if w.strip()
+        ]
+        settings["result_ui"] = (
+            "popup" if self.result_ui_var.get() == "Full preview window" else "overlay"
+        )
+        settings["smart_order"] = bool(self.smart_order_var.get())
         save_settings(settings)
         reload_api_keys()
         self.app.on_settings_saved()
@@ -1175,6 +1377,207 @@ def activate_with_key(key: str) -> bool:
     return True
 
 
+class SetupWizard(ctk.CTkFrame):
+    """First-run 3-step wizard: pick provider → paste key & test → done."""
+
+    def __init__(self, master, app):
+        super().__init__(master, fg_color="transparent")
+        self.app = app
+        self.step = 0
+        p = palette()
+
+        wrap = ctk.CTkFrame(self, fg_color="transparent")
+        wrap.place(relx=0.5, rely=0.5, anchor="center")
+        card = Card(wrap, width=520, corner_radius=16)
+        card.pack(padx=20, pady=20)
+        card.pack_propagate(False)
+
+        ctk.CTkLabel(
+            card, text="✦", font=("Segoe UI", 30), text_color=ACCENT
+        ).pack(pady=(24, 4))
+        self.step_badge = badge(card, "STEP 1 OF 3", ACCENT)
+        self.step_badge.pack(pady=(0, 8))
+        self.title_lbl = ctk.CTkLabel(
+            card, text="", font=("Segoe UI Semibold", 19), text_color=p["text"]
+        )
+        self.title_lbl.pack(pady=(0, 6))
+        self.body_lbl = ctk.CTkLabel(
+            card, text="", font=("Segoe UI", 13), text_color=p["muted"],
+            justify="center", wraplength=440,
+        )
+        self.body_lbl.pack(pady=(0, 14))
+
+        # Step 0 controls
+        self.pick_frame = ctk.CTkFrame(card, fg_color="transparent")
+        labels = [PROVIDER_LABELS[n] for n in ALL_PROVIDERS]
+        self._label_to_name = {PROVIDER_LABELS[n]: n for n in ALL_PROVIDERS}
+        self.provider_var = ctk.StringVar(value="Groq")
+        ctk.CTkOptionMenu(
+            self.pick_frame, variable=self.provider_var, values=labels,
+            width=260, height=38, corner_radius=10, fg_color=p["card2"],
+            button_color=p["border"], button_hover_color=p["sidebar_hover"],
+            text_color=p["text"], font=("Segoe UI", 13),
+        ).pack(pady=(0, 8))
+        ctk.CTkButton(
+            self.pick_frame, text="Get a free key ↗", width=200, height=36,
+            fg_color="transparent", border_width=1, border_color=ACCENT,
+            text_color=ACCENT, hover_color=p["card2"], corner_radius=10,
+            command=self._open_key_page,
+        ).pack()
+
+        # Step 1 controls
+        self.key_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self.key_entry = ctk.CTkEntry(
+            self.key_frame, width=400, height=42, corner_radius=10,
+            fg_color=p["card2"], border_color=p["border"], text_color=p["text"],
+            show="•", font=("Consolas", 13),
+            placeholder_text="Paste your API key",
+        )
+        self.key_entry.pack(pady=(0, 8))
+        self.key_entry.bind("<Return>", lambda e: self._test_and_next())
+        show_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self.key_frame, text="Show key", variable=show_var,
+            checkbox_width=16, checkbox_height=16, fg_color=ACCENT,
+            font=("Segoe UI", 11), text_color=p["muted"],
+            command=lambda: self.key_entry.configure(
+                show="" if show_var.get() else "•"
+            ),
+        ).pack(anchor="w")
+        self.key_status = ctk.CTkLabel(
+            self.key_frame, text="", font=("Segoe UI", 12),
+            text_color=DANGER, wraplength=420,
+        )
+        self.key_status.pack(pady=(6, 0))
+
+        # Step 2 controls
+        self.done_frame = ctk.CTkFrame(card, fg_color="transparent")
+        ctk.CTkLabel(
+            self.done_frame, text="✓", font=("Segoe UI", 34), text_color=SUCCESS
+        ).pack()
+        ctk.CTkLabel(
+            self.done_frame,
+            text=f"Press {get('hotkey') or 'ctrl+alt+z'} on selected text\nto proofread anywhere.",
+            font=("Segoe UI", 13), text_color=p["muted"], justify="center",
+        ).pack(pady=(4, 0))
+
+        btn_row = ctk.CTkFrame(card, fg_color="transparent")
+        btn_row.pack(fill="x", padx=24, pady=(16, 6))
+        self.back_btn = ctk.CTkButton(
+            btn_row, text="Back", width=90, height=38,
+            fg_color="transparent", border_width=1, border_color=p["border"],
+            text_color=p["muted"], hover_color=p["card2"], corner_radius=10,
+            command=self._back,
+        )
+        self.back_btn.pack(side="left", padx=(0, 8))
+        self.next_btn = ctk.CTkButton(
+            btn_row, text="Continue", width=150, height=38,
+            fg_color=ACCENT, hover_color="#3a76e0", corner_radius=10,
+            font=("Segoe UI Semibold", 13), command=self._next,
+        )
+        self.next_btn.pack(side="right")
+        ctk.CTkButton(
+            card, text="Skip for now", width=120, height=30,
+            fg_color="transparent", hover_color=p["card"],
+            text_color=p["muted"], font=("Segoe UI", 12),
+            command=lambda: self.app.finish_wizard(),
+        ).pack(pady=(2, 16))
+
+        self.render()
+
+    # --- steps ---
+    def render(self):
+        p = palette()
+        self.pick_frame.pack_forget()
+        self.key_frame.pack_forget()
+        self.done_frame.pack_forget()
+        self.step_badge.configure(text=f"STEP {self.step + 1} OF 3")
+        if self.step == 0:
+            self.title_lbl.configure(text="Choose your AI provider")
+            self.body_lbl.configure(
+                text="The app needs one free API key (bring your own key). "
+                     "Groq is recommended — fast and free."
+            )
+            self.pick_frame.pack()
+            self.back_btn.configure(state="disabled")
+            self.next_btn.configure(text="Continue", command=self._next)
+        elif self.step == 1:
+            name = self._label_to_name.get(self.provider_var.get(), "groq")
+            self.title_lbl.configure(text=f"Paste your {PROVIDER_LABELS[name]} key")
+            self.body_lbl.configure(
+                text="Your key stays on this PC only — never uploaded "
+                     "anywhere except the provider itself."
+            )
+            self.key_status.configure(text="", text_color=DANGER)
+            self.key_frame.pack()
+            self.back_btn.configure(state="normal")
+            self.next_btn.configure(text="Test & continue", command=self._test_and_next)
+        else:
+            self.title_lbl.configure(text="You're all set!")
+            self.body_lbl.configure(
+                text="Setup complete. Everything runs quietly in the tray."
+            )
+            self.done_frame.pack()
+            self.back_btn.configure(state="disabled")
+            self.next_btn.configure(text="Finish", command=lambda: self.app.finish_wizard())
+
+    def _next(self):
+        self.step = min(2, self.step + 1)
+        self.render()
+
+    def _back(self):
+        self.step = max(0, self.step - 1)
+        self.render()
+
+    def _open_key_page(self):
+        name = self._label_to_name.get(self.provider_var.get(), "groq")
+        url = PROVIDER_URLS.get(name, "")
+        if url:
+            import webbrowser
+
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+
+    def _test_and_next(self):
+        from llm import test_provider
+
+        name = self._label_to_name.get(self.provider_var.get(), "groq")
+        key = (self.key_entry.get() or "").strip()
+        if not key:
+            self.key_status.configure(text="Paste your API key first.")
+            return
+        self.next_btn.configure(state="disabled", text="Testing…")
+        self.key_status.configure(text="", text_color=DANGER)
+
+        def run():
+            settings = load_settings()
+            keys = dict(settings.get("api_keys") or {})
+            keys[name] = key
+            settings["api_keys"] = keys
+            save_settings(settings)
+            reload_api_keys()
+            ok, msg = test_provider(name)
+
+            def done():
+                if not self.winfo_exists():
+                    return
+                self.next_btn.configure(state="normal", text="Test & continue")
+                if ok:
+                    self.step = 2
+                    self.render()
+                else:
+                    self.key_status.configure(text=f"Test failed — {msg}")
+
+            try:
+                self.after(0, done)
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+
 class ActivationPage(ctk.CTkFrame):
     def __init__(self, master, app):
         super().__init__(master)
@@ -1285,8 +1688,7 @@ class MainWindow(ctk.CTk):
             self._build_activation_shell()
         else:
             self._build_shell()
-            first = not bool(get("onboarded", False))
-            self.show_page("guide" if first else "home")
+            self._route_initial()
 
     def _build_activation_shell(self):
         p = palette()
@@ -1314,8 +1716,7 @@ class MainWindow(ctk.CTk):
         except Exception:
             pass
         self._build_shell()
-        first = not bool(get("onboarded", False))
-        self.show_page("guide" if first else "home")
+        self._route_initial()
         try:
             self.app_callbacks.get("on_activated")()
         except Exception:
@@ -1403,10 +1804,35 @@ class MainWindow(ctk.CTk):
         self.pages["settings"] = SettingsPage(self.content, self)
         self.pages["history"] = HistoryPage(self.content, self)
         self.pages["about"] = AboutPage(self.content, self)
+        self.pages["setup"] = SetupWizard(self.content, self)
         for page in self.pages.values():
             page.grid(row=0, column=0, sticky="nsew")
 
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+
+    def _needs_wizard(self) -> bool:
+        if bool(get("wizard_done", False)):
+            return False
+        try:
+            from llm import available_providers
+
+            return not available_providers()
+        except Exception:
+            return True
+
+    def _route_initial(self):
+        if self._needs_wizard():
+            self.show_page("setup")
+            return
+        first = not bool(get("onboarded", False))
+        self.show_page("guide" if first else "home")
+
+    def finish_wizard(self):
+        settings = load_settings()
+        settings["wizard_done"] = True
+        save_settings(settings)
+        first = not bool(get("onboarded", False))
+        self.show_page("guide" if first else "home")
 
     def show_page(self, key: str):
         p = palette()

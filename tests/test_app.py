@@ -333,5 +333,200 @@ class TestUpdater(ConfigTestCase):
         self.assertTrue(self.config.DEFAULT_SETTINGS["auto_update"])
 
 
+class TestPromptBuilder(ConfigTestCase):
+    def test_new_settings_defaults(self):
+        d = self.config.DEFAULT_SETTINGS
+        self.assertEqual(d["tone"], "professional")
+        self.assertEqual(d["translate_to"], "")
+        self.assertEqual(d["ignore_words"], [])
+        self.assertEqual(d["result_ui"], "overlay")
+        self.assertTrue(d["smart_order"])
+        self.assertFalse(d["wizard_done"])
+        self.assertEqual(d["provider_stats"], {})
+
+    def test_system_prompt_language_aware(self):
+        s = self.config.SYSTEM_PROMPT
+        self.assertIn("detect the language", s)
+        self.assertIn("SAME LANGUAGE", s)
+        self.assertIn("Return ONLY", s)
+
+    def test_tone_variants_differ(self):
+        prof = self.config.build_system_prompt(
+            tone="professional", translate_to="", ignore_words=[]
+        )
+        casual = self.config.build_system_prompt(
+            tone="casual", translate_to="", ignore_words=[]
+        )
+        short = self.config.build_system_prompt(
+            tone="short", translate_to="", ignore_words=[]
+        )
+        self.assertIn(self.config.TONES["professional"], prof)
+        self.assertIn(self.config.TONES["casual"], casual)
+        self.assertIn(self.config.TONES["short"], short)
+        self.assertNotEqual(prof, casual)
+        self.assertNotEqual(short, casual)
+
+    def test_invalid_tone_falls_back(self):
+        s = self.config.build_system_prompt(
+            tone="nope", translate_to="", ignore_words=[]
+        )
+        self.assertIn(self.config.TONES["professional"], s)
+
+    def test_translate_clause(self):
+        on = self.config.build_system_prompt(
+            tone="professional", translate_to="Hindi", ignore_words=[]
+        )
+        off = self.config.build_system_prompt(
+            tone="professional", translate_to="", ignore_words=[]
+        )
+        self.assertIn("translate the result into Hindi", on)
+        self.assertNotIn("translate the result into", off)
+        self.assertIn("SAME language", off)
+
+    def test_ignore_words_clause(self):
+        s = self.config.build_system_prompt(
+            tone="professional", translate_to="",
+            ignore_words=["Pranjit", "Groq", ""],
+        )
+        self.assertIn("Pranjit", s)
+        self.assertIn("Groq", s)
+        self.assertNotIn(", .", s)
+
+    def test_reads_settings_when_args_omitted(self):
+        self.config._settings_cache = {
+            **self.config.DEFAULT_SETTINGS,
+            "tone": "academic",
+            "translate_to": "Spanish",
+            "ignore_words": ["myBrand"],
+        }
+        s = self.config.build_system_prompt()
+        self.assertIn(self.config.TONES["academic"], s)
+        self.assertIn("into Spanish", s)
+        self.assertIn("myBrand", s)
+
+    def test_settings_sanitizes_bad_values(self):
+        self.config.settings_file().write_text(
+            json.dumps(
+                {
+                    "tone": "weird",
+                    "translate_to": 123,
+                    "ignore_words": "not-a-list",
+                    "result_ui": "fancy",
+                    "smart_order": "yes",
+                    "provider_stats": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.config._settings_cache = None
+        loaded = self.config.load_settings()
+        self.assertEqual(loaded["tone"], "professional")
+        self.assertEqual(loaded["translate_to"], "")
+        self.assertEqual(loaded["ignore_words"], [])
+        self.assertEqual(loaded["result_ui"], "overlay")
+        self.assertTrue(loaded["smart_order"])
+        self.assertEqual(loaded["provider_stats"], {})
+
+
+class TestSmartOrder(ConfigTestCase):
+    def setUp(self):
+        super().setUp()
+        import importlib
+
+        import llm
+
+        self.llm = importlib.reload(llm)
+        self.llm.API_KEYS = self.config.API_KEYS
+
+    def _seed(self, stats, smart=True):
+        self.config._settings_cache = {
+            **self.config.DEFAULT_SETTINGS,
+            "provider_stats": stats,
+            "smart_order": smart,
+            "api_keys": {},
+        }
+
+    def test_untested_keeps_user_order(self):
+        self._seed({})
+        order = ["groq", "gemini", "deepseek"]
+        self.assertEqual(self.llm.smart_sort_order(order), order)
+
+    def test_fastest_first(self):
+        self._seed(
+            {
+                "groq": {"avg": 2.5, "ok": 5, "fail": 0},
+                "gemini": {"avg": 0.5, "ok": 5, "fail": 0},
+                "deepseek": {"avg": 1.2, "ok": 5, "fail": 0},
+            }
+        )
+        self.assertEqual(
+            self.llm.smart_sort_order(["groq", "gemini", "deepseek"]),
+            ["gemini", "deepseek", "groq"],
+        )
+
+    def test_failed_never_ok_sinks_to_bottom(self):
+        self._seed(
+            {
+                "groq": {"avg": 0, "ok": 0, "fail": 3},
+                "gemini": {"avg": 1.0, "ok": 2, "fail": 0},
+            }
+        )
+        self.assertEqual(
+            self.llm.smart_sort_order(["groq", "gemini"]),
+            ["gemini", "groq"],
+        )
+
+    def test_ties_keep_user_order(self):
+        self._seed(
+            {
+                "groq": {"avg": 1.0, "ok": 3, "fail": 0},
+                "gemini": {"avg": 1.0, "ok": 3, "fail": 0},
+            }
+        )
+        order = ["groq", "gemini"]
+        self.assertEqual(self.llm.smart_sort_order(order), order)
+
+    def test_smart_order_disabled(self):
+        self._seed(
+            {
+                "groq": {"avg": 9.0, "ok": 5, "fail": 0},
+                "gemini": {"avg": 0.1, "ok": 5, "fail": 0},
+            },
+            smart=False,
+        )
+        order = ["groq", "gemini"]
+        self.assertEqual(self.llm.smart_sort_order(order), order)
+
+    def test_record_provider_result_success(self):
+        self._seed({})
+        self.llm.record_provider_result("groq", 1.5, True)
+        stats = self.config.get("provider_stats")
+        self.assertEqual(stats["groq"]["ok"], 1)
+        self.assertEqual(stats["groq"]["fail"], 0)
+        self.assertAlmostEqual(stats["groq"]["avg"], 1.5, places=3)
+
+    def test_record_provider_result_running_average(self):
+        self._seed({})
+        self.llm.record_provider_result("groq", 1.0, True)
+        self.llm.record_provider_result("groq", 3.0, True)
+        stats = self.config.get("provider_stats")
+        self.assertEqual(stats["groq"]["ok"], 2)
+        self.assertAlmostEqual(stats["groq"]["avg"], 2.0, places=3)
+
+    def test_record_provider_result_failure(self):
+        self._seed({})
+        self.llm.record_provider_result("gemini", None, False)
+        stats = self.config.get("provider_stats")
+        self.assertEqual(stats["gemini"]["fail"], 1)
+        self.assertEqual(stats["gemini"]["ok"], 0)
+
+    def test_record_result_written_to_file(self):
+        self._seed({})
+        self.llm.record_provider_result("groq", 2.0, True)
+        self.config._settings_cache = None
+        loaded = self.config.load_settings()
+        self.assertIn("groq", loaded["provider_stats"])
+
+
 if __name__ == "__main__":
     unittest.main()

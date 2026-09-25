@@ -503,16 +503,18 @@ def _show_loading():
 
 
 def _show_popup(original, corrected, original_clip, fg, provider=""):
-    from ui import Popup
+    on_replace = lambda: replace_text(corrected, original_clip, fg)
+    on_copy = lambda: copy_text(corrected)
+    if get("result_ui", "overlay") == "popup":
+        from ui import Popup
 
-    Popup(
-        _root,
-        original,
-        corrected,
-        on_replace=lambda: replace_text(corrected, original_clip, fg),
-        on_copy=lambda: copy_text(corrected),
-        provider=provider,
-    )
+        Popup(_root, original, corrected, on_replace=on_replace, on_copy=on_copy,
+              provider=provider)
+    else:
+        from ui import ResultOverlay
+
+        ResultOverlay(_root, original, corrected, on_replace=on_replace,
+                      on_copy=on_copy, provider=provider)
 
 
 def _show_error(message):

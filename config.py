@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 APP_NAME = "AI Proofreader"
 APP_ID = "AIProofreader"
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 DEFAULT_SETTINGS = {
     "hotkey": "ctrl+alt+z",
@@ -21,6 +21,13 @@ DEFAULT_SETTINGS = {
     "update_repo": "HITESHDAS-01/proofread_ai",
     "activated": False,
     "license_key": "",
+    "tone": "professional",
+    "translate_to": "",
+    "ignore_words": [],
+    "result_ui": "overlay",
+    "smart_order": True,
+    "wizard_done": False,
+    "provider_stats": {},
 }
 
 PROVIDER_LABELS = {
@@ -50,16 +57,85 @@ PROVIDER_URLS = {
     "claude": "https://console.anthropic.com/settings/keys",
 }
 
-SYSTEM_PROMPT = (
+TONES = {
+    "professional": (
+        "Make the tone professional and polished."
+    ),
+    "formal": (
+        "Rewrite in a formal register: complete sentences, no contractions, "
+        "no slang or colloquialisms."
+    ),
+    "casual": (
+        "Keep the text conversational and friendly — fix grammar and clarity "
+        "without making it stiff or corporate."
+    ),
+    "short": (
+        "Make the text concise: fix grammar and cut redundant words or "
+        "phrases while keeping the original meaning."
+    ),
+    "academic": (
+        "Use an academic style: precise, objective, and scholarly — "
+        "no contractions, no informal expressions."
+    ),
+}
+
+BASE_PROMPT = (
     "You are a proofreader. First detect the language of the input text. "
-    "Correct grammar, spelling, and punctuation IN THAT SAME LANGUAGE — "
-    "never translate, never switch scripts. "
-    "If the language is English, also fix capitalization (sentence case) "
-    "and make the tone professional. "
+    "If the text mixes languages or uses romanized native words (e.g. Hinglish), "
+    "keep the exact same language mix and script — do not convert it into a "
+    "single language. "
+    "Otherwise, correct grammar, spelling, and punctuation IN THE SAME LANGUAGE "
+    "of the input — never translate, never switch scripts. "
+    "If the text is English, also fix capitalization (sentence case). "
     "For other languages, follow that language's own capitalization and "
     "punctuation conventions. "
     "Preserve the original meaning, register, and formatting (line breaks, lists). "
-    "Return ONLY the corrected text, no explanation."
+)
+
+
+def build_system_prompt(
+    tone: str | None = None,
+    translate_to: str | None = None,
+    ignore_words: list | None = None,
+) -> str:
+    """Compose the system prompt from current settings.
+
+    - tone: one of TONES keys (defaults to settings "tone", then "professional")
+    - translate_to: target language name; empty/None keeps original language
+    - ignore_words: words/names the model must not alter
+    """
+    if tone is None:
+        tone = get("tone", "professional") or "professional"
+    if translate_to is None:
+        translate_to = get("translate_to", "") or ""
+    if ignore_words is None:
+        ignore_words = get("ignore_words", []) or []
+
+    parts = [BASE_PROMPT]
+    parts.append(TONES.get(tone, TONES["professional"]) + " ")
+    target = str(translate_to).strip()
+    if target:
+        parts.append(
+            f"After proofreading, translate the result into {target}. "
+            "Return ONLY the translated text. "
+        )
+    else:
+        parts.append(
+            "Return the corrected text in the SAME language as the input. "
+        )
+    words = [str(w).strip() for w in ignore_words if str(w).strip()]
+    if words:
+        parts.append(
+            "Do NOT change these words/names (leave them exactly as written): "
+            + ", ".join(words)
+            + ". "
+        )
+    parts.append("Return ONLY the text, no explanation.")
+    return "".join(parts)
+
+
+SYSTEM_PROMPT = build_system_prompt(
+    tone="professional", translate_to="", ignore_words=[]
 )
 
 REQUEST_TIMEOUT = 30
@@ -156,6 +232,18 @@ def load_settings() -> dict:
         merged["api_keys"] = {}
     if not isinstance(merged.get("max_history"), int):
         merged["max_history"] = 100
+    if merged.get("tone") not in TONES:
+        merged["tone"] = "professional"
+    if not isinstance(merged.get("translate_to"), str):
+        merged["translate_to"] = ""
+    if not isinstance(merged.get("ignore_words"), list):
+        merged["ignore_words"] = []
+    if merged.get("result_ui") not in ("overlay", "popup"):
+        merged["result_ui"] = "overlay"
+    if not isinstance(merged.get("smart_order"), bool):
+        merged["smart_order"] = True
+    if not isinstance(merged.get("provider_stats"), dict):
+        merged["provider_stats"] = {}
     _settings_cache = merged
     return dict(merged)
 
