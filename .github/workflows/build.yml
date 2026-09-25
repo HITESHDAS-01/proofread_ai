@@ -81,6 +81,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           repository: HITESHDAS-01/ai-proofreader-releases
+          token: ${{ secrets.RELEASES_TOKEN }}
           files: |
             dist/AI_Proofreader.exe
             LICENSE
