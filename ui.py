@@ -92,8 +92,16 @@ def badge(parent, text, color=ACCENT):
     return b
 
 
+TRANSLATE_LANGS = [
+    "Hindi", "Bengali", "Urdu", "Spanish", "French", "German", "Italian",
+    "Portuguese", "Russian", "Japanese", "Chinese", "Korean", "Arabic",
+    "Turkish", "Dutch",
+]
+
+
 class Popup(ctk.CTkToplevel):
-    def __init__(self, master, original, corrected, on_replace, on_copy, provider=""):
+    def __init__(self, master, original, corrected, on_replace, on_copy,
+                 provider="", on_translate=None):
         super().__init__(master)
         p = palette()
         self.title("AI Proofreader")
@@ -104,6 +112,7 @@ class Popup(ctk.CTkToplevel):
         self.after(150, self.focus_force)
         self._on_replace = on_replace
         self._on_copy = on_copy
+        self.corrected = corrected
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -145,6 +154,10 @@ class Popup(ctk.CTkToplevel):
         corrected_box.pack(fill="x", padx=12, pady=(0, 12))
         corrected_box.insert("1.0", corrected)
         corrected_box.configure(state="disabled")
+        self.corr_box = corrected_box
+
+        if on_translate:
+            self.translate_ctl = TranslateControl(self, self, on_translate)
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(fill="x", padx=18, pady=(4, 18))
@@ -175,13 +188,79 @@ class Popup(ctk.CTkToplevel):
 
     def _replace(self):
         cb = self._on_replace
+        text = self.corrected
         self.destroy()
-        cb()
+        cb(text)
 
     def _copy(self):
         cb = self._on_copy
+        text = self.corrected
         self.destroy()
-        cb()
+        cb(text)
+
+    def _apply_translation(self, new_text):
+        self.corrected = new_text
+        try:
+            self.corr_box.configure(state="normal")
+            self.corr_box.delete("1.0", "end")
+            self.corr_box.insert("1.0", new_text)
+            self.corr_box.configure(state="disabled")
+        except Exception:
+            pass
+
+
+class TranslateControl:
+    """'Translate ▾' dropdown + status; owner must implement _apply_translation(new)."""
+
+    PLACEHOLDER = "Translate ▾"
+
+    def __init__(self, parent, owner, on_translate, width=150):
+        self.owner = owner
+        self.on_translate = on_translate
+        p = palette()
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=18, pady=(0, 6))
+        ctk.CTkLabel(
+            row, text="Translate:", font=("Segoe UI", 12), text_color=p["muted"]
+        ).pack(side="left")
+        self.var = ctk.StringVar(value=self.PLACEHOLDER)
+        self.menu = ctk.CTkOptionMenu(
+            row, variable=self.var,
+            values=[self.PLACEHOLDER] + TRANSLATE_LANGS,
+            width=width, height=30, corner_radius=8, fg_color=p["card2"],
+            button_color=p["border"], button_hover_color=p["sidebar_hover"],
+            text_color=p["text"], font=("Segoe UI", 12), command=self._select,
+        )
+        self.menu.pack(side="left", padx=(8, 8))
+        self.status = ctk.CTkLabel(
+            row, text="", font=("Segoe UI", 11), text_color=p["muted"]
+        )
+        self.status.pack(side="left")
+
+    def _select(self, choice):
+        if choice == self.PLACEHOLDER:
+            return
+        lang = choice
+        self.var.set(self.PLACEHOLDER)
+        self.menu.configure(state="disabled")
+        self.status.configure(text=f"Translating to {lang}…", text_color=ACCENT)
+        self.on_translate(lang, self._done)
+
+    def _done(self, new_text, err=None):
+        try:
+            self.menu.configure(state="normal")
+        except Exception:
+            pass
+        if err or not new_text:
+            self.status.configure(
+                text=f"Failed: {err or 'no result'}"[:80], text_color=DANGER
+            )
+            return
+        self.status.configure(text="✓ translated", text_color=SUCCESS)
+        try:
+            self.owner._apply_translation(new_text)
+        except Exception:
+            pass
 
 
 class ResultOverlay(ctk.CTkToplevel):
@@ -192,7 +271,8 @@ class ResultOverlay(ctk.CTkToplevel):
 
     AUTO_CLOSE_MS = 15000
 
-    def __init__(self, master, original, corrected, on_replace, on_copy, provider=""):
+    def __init__(self, master, original, corrected, on_replace, on_copy,
+                 provider="", on_translate=None):
         super().__init__(master)
         p = palette()
         self.overrideredirect(True)
@@ -200,6 +280,7 @@ class ResultOverlay(ctk.CTkToplevel):
         self.attributes("-topmost", True)
         self._on_replace = on_replace
         self._on_copy = on_copy
+        self.corrected = corrected
 
         preview = corrected if len(corrected) <= 240 else corrected[:240] + "…"
 
@@ -222,6 +303,14 @@ class ResultOverlay(ctk.CTkToplevel):
         box.pack(fill="x", padx=12, pady=(4, 8))
         box.insert("1.0", preview)
         box.configure(state="disabled")
+        self.box = box
+
+        if on_translate:
+            def wrapped_translate(lang, done, _inner=on_translate):
+                self._cancel_auto_close()
+                _inner(lang, done)
+
+            self.translate_ctl = TranslateControl(self, self, wrapped_translate, width=132)
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(fill="x", padx=12, pady=(0, 10))
@@ -284,23 +373,37 @@ class ResultOverlay(ctk.CTkToplevel):
         except Exception:
             pass
 
-    def _replace(self):
-        cb = self._on_replace
+    def _cancel_auto_close(self):
         try:
             self.after_cancel(self._auto_close)
+            self._auto_close = None
         except Exception:
             pass
+
+    def _replace(self):
+        cb = self._on_replace
+        text = self.corrected
+        self._cancel_auto_close()
         self.destroy()
-        cb()
+        cb(text)
 
     def _copy(self):
         cb = self._on_copy
+        text = self.corrected
+        self._cancel_auto_close()
+        self.destroy()
+        cb(text)
+
+    def _apply_translation(self, new_text):
+        self.corrected = new_text
         try:
-            self.after_cancel(self._auto_close)
+            preview = new_text if len(new_text) <= 240 else new_text[:240] + "…"
+            self.box.configure(state="normal")
+            self.box.delete("1.0", "end")
+            self.box.insert("1.0", preview)
+            self.box.configure(state="disabled")
         except Exception:
             pass
-        self.destroy()
-        cb()
 
 
 class LoadingPopup(ctk.CTkToplevel):

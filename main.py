@@ -503,18 +503,38 @@ def _show_loading():
 
 
 def _show_popup(original, corrected, original_clip, fg, provider=""):
-    on_replace = lambda: replace_text(corrected, original_clip, fg)
-    on_copy = lambda: copy_text(corrected)
+    base = corrected
+
+    def on_replace(text=None):
+        replace_text(text if text is not None else base, original_clip, fg)
+
+    def on_copy(text=None):
+        copy_text(text if text is not None else base)
+
+    def on_translate(lang, done_cb):
+        def work():
+            try:
+                prompt = config.build_system_prompt(translate_to=lang)
+                new = check_text(base, prompt)
+                if not new or not str(new).strip():
+                    raise ValueError("empty translation")
+                ui(done_cb, str(new).strip(), None)
+            except Exception as exc:
+                log.warning("quick translate failed (%s): %s", lang, exc)
+                ui(done_cb, None, str(exc))
+
+        threading.Thread(target=work, daemon=True).start()
+
     if get("result_ui", "overlay") == "popup":
         from ui import Popup
 
         Popup(_root, original, corrected, on_replace=on_replace, on_copy=on_copy,
-              provider=provider)
+              provider=provider, on_translate=on_translate)
     else:
         from ui import ResultOverlay
 
         ResultOverlay(_root, original, corrected, on_replace=on_replace,
-                      on_copy=on_copy, provider=provider)
+                      on_copy=on_copy, provider=provider, on_translate=on_translate)
 
 
 def _show_error(message):
