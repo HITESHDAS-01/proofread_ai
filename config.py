@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 APP_NAME = "AI Proofreader"
 APP_ID = "AIProofreader"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 DEFAULT_SETTINGS = {
     "hotkey": "ctrl+alt+z",
@@ -93,7 +93,11 @@ def env_file() -> Path:
 
 
 def _load_env() -> None:
-    candidates = [app_dir() / ".env", Path(__file__).resolve().parent / ".env"]
+    candidates = [
+        app_dir() / ".env",
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parent / ".env",
+    ]
     for path in candidates:
         if path.is_file():
             load_dotenv(path)

@@ -581,31 +581,44 @@ def _refresh_home():
 
 def on_hotkey():
     global _busy
+    log.info("hotkey pressed enabled=%s busy=%s", ENABLED, _busy)
     if not ENABLED or _busy:
+        log.info("hotkey ignored: enabled=%s busy=%s", ENABLED, _busy)
         return
     try:
         from ui import is_app_activated
 
         if not is_app_activated():
+            log.info("hotkey ignored: not activated")
             ui(
                 _show_error,
                 "AI Proofreader is not activated. Open the app and enter your access key.",
             )
             return
     except Exception:
+        log.exception("activation check failed")
         if not get("activated", False):
+            log.info("hotkey ignored: not activated (fallback)")
             ui(
                 _show_error,
                 "AI Proofreader is not activated. Open the app and enter your access key.",
             )
             return
-    if not available_providers():
+    providers = available_providers()
+    if not providers:
+        log.info(
+            "hotkey ignored: no providers (settings_keys=%s)",
+            sorted(
+                k for k, v in (load_settings().get("api_keys") or {}).items() if v
+            ),
+        )
         ui(
             _show_error,
             "No API keys configured (bring your own key). Open Settings → Providers "
             "and add at least one key.",
         )
         return
+    log.info("hotkey accepted providers=%s", providers)
     # Capture source window BEFORE any of our UI is created
     pre_fg = _get_foreground()
     if _is_our_window(pre_fg):
@@ -647,8 +660,12 @@ def rebind_hotkey():
             keyboard.remove_hotkey(_hotkey_hook)
     except Exception:
         pass
-    _hotkey_hook = keyboard.add_hotkey(hotkey, on_hotkey)
-    log.info("hotkey bound: %s", hotkey)
+    try:
+        _hotkey_hook = keyboard.add_hotkey(hotkey, on_hotkey)
+        log.info("hotkey bound: %s", hotkey)
+    except Exception:
+        _hotkey_hook = None
+        log.exception("hotkey bind failed: %s", hotkey)
 
 
 def set_enabled(enabled: bool):
@@ -773,6 +790,12 @@ def main():
         VERSION,
         get("hotkey"),
         bool(get("activated", False)),
+    )
+    log.info(
+        "providers available=%s settings_keys=%s env_groq=%s",
+        available_providers(),
+        sorted(k for k, v in (settings.get("api_keys") or {}).items() if v),
+        bool(os.getenv("GROQ_API_KEY")),
     )
 
     if settings.get("auto_update", True):
