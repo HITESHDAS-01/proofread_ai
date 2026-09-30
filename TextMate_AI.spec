@@ -11,7 +11,7 @@ a = Analysis(
         + [(f, ".") for f in ("LICENSE", "PRIVACY.md")
            if __import__("pathlib").Path(f).exists()]
     ),
-    hiddenimports=["customtkinter", "license"],
+    hiddenimports=["customtkinter", "license", "ocr", "textdiff"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -30,7 +30,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="AI_Proofreader",
+    name="TextMate_AI",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

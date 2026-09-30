@@ -1,13 +1,42 @@
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-APP_NAME = "AI Proofreader"
-APP_ID = "AIProofreader"
-VERSION = "1.0.9"
+APP_NAME = "TextMate AI"
+APP_ID = "TextMateAI"
+LEGACY_APP_ID = "AIProofreader"
+VERSION = "1.1.0"
+
+DEFAULT_MY_COMMANDS = [
+    {
+        "name": "Professional Email",
+        "prompt": "Rewrite as a polished professional email with a greeting and sign-off.",
+    },
+    {
+        "name": "WhatsApp Reply",
+        "prompt": "Rewrite as a short, friendly WhatsApp reply. Casual tone, no formalities.",
+    },
+    {
+        "name": "Simplify",
+        "prompt": "Simplify the language so anyone can understand it. Keep the meaning.",
+    },
+    {
+        "name": "Translate to Assamese",
+        "prompt": "Translate to Assamese. Preserve names, numbers and factual meaning.",
+    },
+    {
+        "name": "Explain simply",
+        "prompt": "Explain in simple language in 3-5 lines.",
+    },
+    {
+        "name": "Bullet points",
+        "prompt": "Convert to clear bullet points.",
+    },
+]
 
 DEFAULT_SETTINGS = {
     "hotkey": "ctrl+alt+z",
@@ -18,7 +47,7 @@ DEFAULT_SETTINGS = {
     "max_history": 100,
     "onboarded": False,
     "auto_update": True,
-    "update_repo": "HITESHDAS-01/ai-proofreader-releases",
+    "update_repo": "HITESHDAS-01/textmate-ai-releases",
     "activated": False,
     "license_key": "",
     "tone": "professional",
@@ -28,6 +57,10 @@ DEFAULT_SETTINGS = {
     "smart_order": True,
     "wizard_done": False,
     "provider_stats": {},
+    "palette_hotkey": "ctrl+alt+space",
+    "ocr_hotkey": "ctrl+alt+o",
+    "undo_hotkey": "ctrl+alt+u",
+    "my_commands": DEFAULT_MY_COMMANDS,
 }
 
 PROVIDER_LABELS = {
@@ -116,17 +149,120 @@ BASE_PROMPT = (
     "Preserve the original meaning, register, and formatting (line breaks, lists). "
 )
 
+LANG_GUARD = (
+    "First detect the language of the input text. If the text mixes languages "
+    "or uses romanized native words (e.g. Hinglish), keep the exact same "
+    "language mix and script. Always answer in the same language as the "
+    "input text unless the task says otherwise. "
+)
+
+# Built-in actions. kind: "edit" -> output replaces/source text (tone+translate
+# clauses apply); "info" -> output is informational (explain/summarize/...).
+ACTIONS = {
+    "proofread": {
+        "label": "Proofread",
+        "kind": "edit",
+        "rule": "",
+    },
+    "grammar": {
+        "label": "Fix grammar only",
+        "kind": "edit",
+        "rule": (
+            "Fix ONLY grammar, spelling, and punctuation mistakes. "
+            "Do not reword, reorder, or change the style. "
+            "If nothing is wrong, return the text unchanged."
+        ),
+    },
+    "improve": {
+        "label": "Improve",
+        "kind": "edit",
+        "rule": (
+            "Improve clarity, grammar, and awkward wording while preserving "
+            "the original meaning, language, and register. Cut redundancy. "
+            "Keep it natural, not robotic."
+        ),
+    },
+    "clean": {
+        "label": "Clean up",
+        "kind": "edit",
+        "rule": (
+            "Remove filler words and hedging (um, uh, basically, I think, "
+            "just, you know, kind of) and resolve self-corrections or "
+            "backtracking such as 'at 5 ... actually 6pm' or 'Friday — I mean "
+            "Monday' to the final intended meaning. Fix small grammar issues "
+            "left behind. Keep the meaning and language unchanged."
+        ),
+    },
+    "format": {
+        "label": "Format",
+        "kind": "edit",
+        "rule": (
+            "Reformat the text: split into paragraphs, turn clear sequences "
+            "into numbered or bulleted lists, and structure it as an email "
+            "if it is an email. Preserve all wording — do not rewrite."
+        ),
+    },
+    "explain": {
+        "label": "Explain",
+        "kind": "info",
+        "rule": (
+            "Explain the selected text in simple language in 3-5 lines. "
+            "If it is code, explain what the code does. If it is a sentence "
+            "or paragraph, say what it means."
+        ),
+    },
+    "summarize": {
+        "label": "Summarize",
+        "kind": "info",
+        "rule": (
+            "Summarize the selected text as clear bullet points capturing "
+            "the key information."
+        ),
+    },
+    "promptify": {
+        "label": "Make a prompt",
+        "kind": "info",
+        "rule": (
+            "Convert the selected rough text into one clear, well-structured "
+            "AI prompt: add the context, the explicit task, any constraints, "
+            "and the desired output format. Return only the finished prompt."
+        ),
+    },
+}
+
+# Extra summarize presets surfaced in the command palette (action, hint).
+SUMMARIZE_PRESETS = [
+    ("Summarize: 1 sentence", "Summarize in one single sentence."),
+    ("Summarize: short", "Summarize briefly in 2-3 sentences."),
+    ("Summarize: key points", "Summarize as bullet points of the key points only."),
+    ("Summarize: executive summary", "Write a concise executive summary."),
+]
+
+
+def action_kind(action: str) -> str:
+    spec = ACTIONS.get(action)
+    return spec["kind"] if spec else "edit"
+
+
+def action_label(action: str) -> str:
+    spec = ACTIONS.get(action)
+    return spec["label"] if spec else action
+
 
 def build_system_prompt(
     tone: str | None = None,
     translate_to: str | None = None,
     ignore_words: list | None = None,
+    action: str = "proofread",
+    hint: str = "",
 ) -> str:
     """Compose the system prompt from current settings.
 
     - tone: one of TONES keys (defaults to settings "tone", then "professional")
     - translate_to: target language name; empty/None keeps original language
     - ignore_words: words/names the model must not alter
+    - action: key of ACTIONS ("proofread", "improve", "explain", ...)
+    - hint: extra instruction appended to the action rule (e.g. summarize style)
     """
     if tone is None:
         tone = get("tone", "professional") or "professional"
@@ -135,18 +271,27 @@ def build_system_prompt(
     if ignore_words is None:
         ignore_words = get("ignore_words", []) or []
 
-    parts = [BASE_PROMPT]
-    parts.append(TONES.get(tone, TONES["professional"]) + " ")
-    target = str(translate_to).strip()
-    if target:
-        parts.append(
-            f"After proofreading, translate the result into {target}. "
-            "Return ONLY the translated text. "
-        )
+    spec = ACTIONS.get(action) or ACTIONS["proofread"]
+    kind = spec["kind"]
+    if spec["rule"]:
+        parts = [LANG_GUARD, spec["rule"] + " "]
     else:
-        parts.append(
-            "Return the corrected text in the SAME language as the input. "
-        )
+        parts = [BASE_PROMPT]
+    hint = str(hint or "").strip()
+    if hint:
+        parts.append(hint + " ")
+    if kind == "edit":
+        parts.append(TONES.get(tone, TONES["professional"]) + " ")
+        target = str(translate_to).strip()
+        if target:
+            parts.append(
+                f"Afterwards, translate the result into {target}. "
+                "Return ONLY the translated text. "
+            )
+        else:
+            parts.append(
+                "Return the corrected text in the SAME language as the input. "
+            )
     words = [str(w).strip() for w in ignore_words if str(w).strip()]
     if words:
         parts.append(
@@ -154,8 +299,23 @@ def build_system_prompt(
             + ", ".join(words)
             + ". "
         )
-    parts.append("Return ONLY the text, no explanation.")
+    if kind == "edit":
+        parts.append("Return ONLY the text, no explanation.")
+    else:
+        parts.append("Return ONLY the result, no preamble.")
     return "".join(parts)
+
+
+def custom_prompt_system(command_prompt: str) -> str:
+    """System prompt for a user-defined My Command."""
+    task = str(command_prompt or "").strip() or "Improve the text."
+    return (
+        "You are a text assistant. First detect the language of the input "
+        "text. Apply this task to the user's text: "
+        f"{task} "
+        "Keep names, numbers and factual meaning intact. "
+        "Return ONLY the result, no preamble."
+    )
 
 
 SYSTEM_PROMPT = build_system_prompt(
@@ -179,6 +339,12 @@ def app_dir() -> Path:
 def data_dir() -> Path:
     base = os.environ.get("APPDATA") or str(Path.home())
     d = Path(base) / APP_ID
+    legacy = Path(base) / LEGACY_APP_ID
+    if not d.exists() and legacy.is_dir():
+        try:
+            shutil.copytree(legacy, d)
+        except OSError:
+            pass
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -270,8 +436,27 @@ def load_settings() -> dict:
         merged["provider_stats"] = {}
     if merged.get("update_repo") == "HITESHDAS-01/proofread_ai":
         merged["update_repo"] = DEFAULT_SETTINGS["update_repo"]
+    merged["my_commands"] = _sanitize_commands(merged.get("my_commands"))
+    for key in ("palette_hotkey", "ocr_hotkey", "undo_hotkey"):
+        if not isinstance(merged.get(key), str) or not merged[key].strip():
+            merged[key] = DEFAULT_SETTINGS[key]
     _settings_cache = merged
     return dict(merged)
+
+
+def _sanitize_commands(value) -> list:
+    """Return a fresh list of valid {name, prompt} command dicts."""
+    if not isinstance(value, list):
+        value = DEFAULT_MY_COMMANDS
+    out = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        prompt = str(item.get("prompt") or "").strip()
+        if name and prompt:
+            out.append({"name": name, "prompt": prompt})
+    return out
 
 
 def save_settings(settings: dict) -> None:
@@ -280,6 +465,7 @@ def save_settings(settings: dict) -> None:
     merged.update(settings)
     if not isinstance(merged.get("api_keys"), dict):
         merged["api_keys"] = {}
+    merged["my_commands"] = _sanitize_commands(merged.get("my_commands"))
     path = settings_file()
     path.write_text(
         json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8"

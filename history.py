@@ -18,13 +18,14 @@ def _load() -> list:
     return []
 
 
-def add(original: str, corrected: str, provider: str = "") -> dict:
+def add(original: str, corrected: str, provider: str = "", action: str = "proofread") -> dict:
     entry = {
         "ts": time.time(),
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "original": original,
         "corrected": corrected,
         "provider": provider,
+        "action": action,
     }
     items = _load()
     items.insert(0, entry)

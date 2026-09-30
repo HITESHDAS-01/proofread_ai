@@ -1,8 +1,8 @@
-# Privacy Policy — AI Proofreader
+# Privacy Policy — TextMate AI
 
 **Last updated:** 2026-09-24
 
-AI Proofreader ("the app") is a local desktop application. This policy
+TextMate AI ("the app") is a local desktop application. This policy
 explains what data it handles.
 
 ## What the app does NOT do
@@ -17,10 +17,10 @@ explains what data it handles.
 
 | Data | Location | Purpose |
 |------|----------|---------|
-| Settings (hotkey, preferences) | `%APPDATA%\AIProofreader\settings.json` | Remember your choices |
-| API keys you enter | `%APPDATA%\AIProofreader\settings.json` | Call the LLM you configured |
-| Correction history | `%APPDATA%\AIProofreader\history.json` | Show past corrections |
-| Log file | `%APPDATA%\AIProofreader\proofreader.log` | Debugging |
+| Settings (hotkey, preferences) | `%APPDATA%\TextMateAI\settings.json` | Remember your choices |
+| API keys you enter | `%APPDATA%\TextMateAI\settings.json` | Call the LLM you configured |
+| Correction history | `%APPDATA%\TextMateAI\history.json` | Show past corrections |
+| Log file | `%APPDATA%\TextMateAI\proofreader.log` | Debugging |
 
 You can delete this folder at any time to erase local data.
 

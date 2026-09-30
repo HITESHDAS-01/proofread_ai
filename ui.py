@@ -1,21 +1,26 @@
 import threading
+import tkinter as tk
 
 import customtkinter as ctk
 
 import history as history_store
 from config import (
+    ACTIONS,
     PROVIDER_LABELS,
     PROVIDER_URLS,
+    SUMMARIZE_PRESETS,
     TONES,
     TRANSLATE_LANG_GROUPS,
     TRANSLATE_LANGS,
     VERSION,
     API_KEYS,
+    action_label,
     get,
     load_settings,
     reload_api_keys,
     save_settings,
 )
+from textdiff import diff_spans, has_changes, preview_spans
 
 # Modern palette
 ACCENT = "#4f8cff"
@@ -94,27 +99,359 @@ def badge(parent, text, color=ACCENT):
     return b
 
 
-class Popup(ctk.CTkToplevel):
+def fuzzy_match(query: str, text: str) -> bool:
+    """True if every char of query appears in text in order (subsequence)."""
+    q = (query or "").lower().strip()
+    if not q:
+        return True
+    it = iter((text or "").lower())
+    return all(ch in it for ch in q)
+
+
+def _fuzzy_score(query: str, text: str) -> float:
+    q = (query or "").lower().strip()
+    t = (text or "").lower()
+    if not q:
+        return 0.0
+    if q in t:
+        return 100.0 - t.index(q)
+    if fuzzy_match(q, t):
+        return 50.0 - len(t) * 0.01
+    return -1.0
+
+
+def open_menu(anchor, groups, on_pick, width=210, max_height=320):
+    """Open a small dropdown under `anchor`.
+
+    groups: [(section_label, [(label, payload), ...]), ...]
+    on_pick(payload) is called after the menu closes.
+    """
+    p = palette()
+    win = ctk.CTkToplevel(anchor)
+    win.overrideredirect(True)
+    win.attributes("-topmost", True)
+    win.configure(fg_color=p["card"])
+    state = {"win": win}
+
+    def close():
+        if state.get("win") is None:
+            return
+        state["win"] = None
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+    header = ctk.CTkFrame(win, fg_color="transparent")
+    header.pack(fill="x", padx=8, pady=(6, 2))
+    ctk.CTkLabel(
+        header, text="More actions", font=("Segoe UI Semibold", 12),
+        text_color=p["text"],
+    ).pack(side="left", padx=4)
+    ctk.CTkButton(
+        header, text="✕", width=26, height=24, corner_radius=6,
+        fg_color="transparent", hover_color=p["card2"],
+        text_color=p["muted"], command=close,
+    ).pack(side="right")
+
+    scroll = ctk.CTkScrollableFrame(
+        win, width=width, height=max_height, fg_color="transparent",
+        scrollbar_button_color=p["border"],
+    )
+    scroll.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+
+    def pick(payload):
+        close()
+        on_pick(payload)
+
+    for section, entries in groups:
+        if section:
+            ctk.CTkLabel(
+                scroll, text=section.upper(), anchor="w",
+                font=("Segoe UI", 10), text_color=p["muted"],
+            ).pack(fill="x", padx=6, pady=(6, 2))
+        for label, payload in entries:
+            ctk.CTkButton(
+                scroll, text=label, anchor="w", height=28, corner_radius=6,
+                fg_color="transparent", hover_color=p["sidebar_hover"],
+                text_color=p["text"], font=("Segoe UI", 12),
+                command=lambda pl=payload: pick(pl),
+            ).pack(fill="x", padx=2, pady=1)
+
+    try:
+        win.update_idletasks()
+        x = anchor.winfo_rootx()
+        y = anchor.winfo_rooty() + anchor.winfo_height() + 4
+        w = win.winfo_reqwidth() or width + 12
+        h = win.winfo_reqheight() or 340
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        if x + w > sw:
+            x = max(4, sw - w - 6)
+        if y + h > sh:
+            y = max(4, anchor.winfo_rooty() - h - 4)
+        win.geometry(f"+{x}+{y}")
+    except Exception:
+        pass
+    win.bind("<Escape>", lambda e: close())
+
+    def check_focus():
+        if state.get("win") is None:
+            return
+        try:
+            if not win.focus_get():
+                close()
+        except Exception:
+            close()
+
+    win.after(80, lambda: (win.focus_force(), win.bind("<FocusOut>", lambda e: win.after(120, check_focus))))
+    return win
+
+
+class ResultActions:
+    """Shared action-bar, diff rendering, and keyboard support for result windows.
+
+    Subclasses must set before use:
+      self.original, self.corrected, self._on_action, self._action,
+      self.corr_box, self._preview_limit (int or None), self._status (label)
+    """
+
+    NAV_KEYS = {"left", "right", "up", "down"}
+    LETTER_KEYS = {"r", "c", "i", "p"}
+
+    # --- rendering -----------------------------------------------------
+    def _inner_text(self):
+        """Underlying tkinter Text widget (CTkTextbox does not expose tags)."""
+        box = self.corr_box
+        return getattr(box, "_textbox", box)
+
+    def _set_result_text(self, text):
+        self.corrected = text
+        box = self.corr_box
+        limit = self._preview_limit
+        try:
+            spans = diff_spans(self.original, text)
+            truncated = bool(limit and len(text) > limit)
+            if truncated:
+                spans = preview_spans(spans, limit)
+            inner = self._inner_text()
+            box.configure(state="normal")
+            box.delete("1.0", "end")
+            inner.tag_configure(
+                "chg", underline=True, underlinefg=ACCENT, foreground=ACCENT
+            )
+            for segment, changed in spans:
+                if changed:
+                    inner.insert("end", segment, "chg")
+                else:
+                    inner.insert("end", segment)
+            if truncated:
+                inner.insert("end", "…")
+            box.configure(state="disabled")
+        except Exception:
+            try:
+                box.configure(state="normal")
+                box.delete("1.0", "end")
+                box.insert("1.0", text)
+                box.configure(state="disabled")
+            except Exception:
+                pass
+
+    # --- action row ----------------------------------------------------
+    def _build_action_row(self, parent):
+        if not getattr(self, "_on_action", None):
+            return
+        p = palette()
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=12 if self._compact else 18, pady=(0, 4))
+        entries = [
+            ("Proofread", {"action": "proofread"}),
+            ("Improve", {"action": "improve"}),
+            ("Explain", {"action": "explain"}),
+        ]
+        for label, spec in entries:
+            btn = ctk.CTkButton(
+                row, text=label, width=74 if not self._compact else 66,
+                height=28, corner_radius=7, fg_color=p["card2"],
+                border_width=1, border_color=p["border"], text_color=p["text"],
+                hover_color=p["sidebar_hover"], font=("Segoe UI", 11),
+                command=lambda s=spec: self._run_action(s),
+            )
+            btn.pack(side="left", padx=(0, 5))
+            self._register_nav(btn)
+        self.more_btn = ctk.CTkButton(
+            row, text="More ▾", width=68, height=28, corner_radius=7,
+            fg_color="transparent", border_width=1, border_color=p["border"],
+            text_color=p["muted"], hover_color=p["sidebar_hover"],
+            font=("Segoe UI", 11), command=self._open_more,
+        )
+        self.more_btn.pack(side="left", padx=(0, 5))
+        self._register_nav(self.more_btn)
+        self._action_status = ctk.CTkLabel(
+            row, text="", font=("Segoe UI", 10), text_color=p["muted"]
+        )
+        self._action_status.pack(side="right")
+
+    def _open_more(self):
+        groups = [
+            (
+                "Actions",
+                [
+                    ("Fix grammar only", {"action": "grammar"}),
+                    ("Clean up fillers", {"action": "clean"}),
+                    ("Format", {"action": "format"}),
+                    ("Summarize", {"action": "summarize"}),
+                    ("Make a prompt", {"action": "promptify"}),
+                ],
+            ),
+        ]
+        commands = get("my_commands") or []
+        if commands:
+            groups.append(
+                (
+                    "My Commands",
+                    [
+                        (c.get("name", ""), {"command": c.get("prompt", ""),
+                                             "name": c.get("name", "")})
+                        for c in commands
+                        if c.get("name")
+                    ],
+                )
+            )
+        open_menu(self.more_btn, groups, self._run_action)
+
+    def _run_action(self, spec):
+        if not getattr(self, "_on_action", None):
+            return
+        self._set_actions_enabled(False)
+        if getattr(self, "_action_status", None) is not None:
+            self._action_status.configure(text="Working…", text_color=ACCENT)
+
+        def done(text, err, provider=""):
+            if not self.winfo_exists():
+                return
+            self._set_actions_enabled(True)
+            if getattr(self, "_action_status", None) is not None:
+                if err or not text:
+                    self._action_status.configure(
+                        text=f"Failed: {err or 'no result'}"[:70], text_color=DANGER
+                    )
+                else:
+                    self._action_status.configure(text="✓ updated", text_color=SUCCESS)
+                    self.after(2500, lambda: self._clear_status())
+            if not err and text:
+                self._set_result_text(str(text))
+
+        self._on_action(spec, done)
+
+    def _clear_status(self):
+        try:
+            if self.winfo_exists() and getattr(self, "_action_status", None) is not None:
+                self._action_status.configure(text="")
+        except Exception:
+            pass
+
+    def _set_actions_enabled(self, enabled):
+        state = "normal" if enabled else "disabled"
+        for btn in getattr(self, "_nav", []):
+            try:
+                btn.configure(state=state)
+            except Exception:
+                pass
+
+    # --- keyboard navigation -------------------------------------------
+    def _register_nav(self, btn):
+        if not hasattr(self, "_nav"):
+            self._nav = []
+            self._nav_idx = None
+            self._nav_styles = {}
+        try:
+            self._nav_styles[btn] = (
+                btn.cget("border_width"), btn.cget("border_color")
+            )
+        except Exception:
+            self._nav_styles[btn] = (1, palette()["border"])
+        self._nav.append(btn)
+
+    def _nav_move(self, delta):
+        if not getattr(self, "_nav", None):
+            return
+        self._nav_clear_style()
+        cur = self._nav_idx if self._nav_idx is not None else -1
+        idx = (cur + delta) % len(self._nav)
+        self._nav_idx = idx
+        btn = self._nav[idx]
+        try:
+            btn.configure(border_width=2, border_color=ACCENT)
+            btn.focus_set()
+        except Exception:
+            pass
+
+    def _nav_clear_style(self):
+        for btn in getattr(self, "_nav", []):
+            bw, bc = getattr(self, "_nav_styles", {}).get(btn, (1, palette()["border"]))
+            try:
+                btn.configure(border_width=bw, border_color=bc)
+            except Exception:
+                pass
+
+    def _on_key(self, event):
+        k = (event.keysym or "").lower()
+        if k in self.NAV_KEYS:
+            delta = 1 if k in ("right", "down") else -1
+            self._nav_move(delta)
+            return "break"
+        if k in ("return", "kp_enter"):
+            if self._nav_idx is not None and getattr(self, "_nav", None):
+                self._nav[self._nav_idx].invoke()
+            else:
+                self._result_replace()
+            return "break"
+        if k == "escape":
+            self._result_close()
+            return "break"
+        if k == "r":
+            self._result_replace()
+            return "break"
+        if k == "c":
+            self._result_copy()
+            return "break"
+        if k == "i":
+            self._result_close()
+            return "break"
+        if k == "p" and getattr(self, "_on_action", None):
+            self._run_action({"action": "proofread"})
+            return "break"
+        return None
+
+
+class Popup(ResultActions, ctk.CTkToplevel):
     def __init__(self, master, original, corrected, on_replace, on_copy,
-                 provider="", on_translate=None):
+                 provider="", on_translate=None, on_action=None,
+                 action="proofread", action_name=None):
         super().__init__(master)
         p = palette()
-        self.title("AI Proofreader")
-        self.geometry("680x560")
+        self.title("TextMate AI")
+        self.geometry("680x590")
         self.minsize(500, 420)
         self.configure(fg_color=p["bg"])
         self.attributes("-topmost", True)
         self.after(150, self.focus_force)
         self._on_replace = on_replace
         self._on_copy = on_copy
+        self._on_action = on_action
+        self._action = action
+        self.original = original
         self.corrected = corrected
+        self._preview_limit = None
+        self._compact = False
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=18, pady=(16, 6))
         left = ctk.CTkFrame(header, fg_color="transparent")
         left.pack(side="left")
-        ctk.CTkLabel(left, text="Proofread Result", font=("Segoe UI Semibold", 18), text_color=p["text"]).pack(
+        title = action_name or action_label(action)
+        ctk.CTkLabel(left, text=f"✦ {title}", font=("Segoe UI Semibold", 18), text_color=p["text"]).pack(
             anchor="w"
         )
         if provider:
@@ -141,15 +478,16 @@ class Popup(ctk.CTkToplevel):
 
         corr_card = Card(body)
         corr_card.pack(fill="x", pady=(0, 6))
-        labeled(corr_card, "CORRECTED")
+        labeled(corr_card, "RESULT")
         corrected_box = ctk.CTkTextbox(
             corr_card, height=130, wrap="word", fg_color=p["card2"],
             border_width=0, text_color=p["text"]
         )
         corrected_box.pack(fill="x", padx=12, pady=(0, 12))
-        corrected_box.insert("1.0", corrected)
-        corrected_box.configure(state="disabled")
         self.corr_box = corrected_box
+        self._set_result_text(corrected)
+
+        self._build_action_row(body)
 
         if on_translate:
             self.translate_ctl = TranslateControl(self, self, on_translate)
@@ -157,29 +495,43 @@ class Popup(ctk.CTkToplevel):
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(fill="x", padx=18, pady=(4, 18))
 
-        ctk.CTkButton(
+        replace_btn = ctk.CTkButton(
             btns, text="Replace", command=self._replace, width=150, height=40,
             fg_color=ACCENT, hover_color="#3a76e0", corner_radius=10,
             font=("Segoe UI Semibold", 13),
-        ).pack(side="left", padx=(0, 10))
-        ctk.CTkButton(
+        )
+        replace_btn.pack(side="left", padx=(0, 10))
+        copy_btn = ctk.CTkButton(
             btns, text="Copy", command=self._copy, width=110, height=40,
             fg_color=p["card2"], hover_color=p["border"], border_width=1,
             border_color=p["border"], text_color=p["text"], corner_radius=10,
-        ).pack(side="left", padx=10)
-        ctk.CTkButton(
+        )
+        copy_btn.pack(side="left", padx=10)
+        cancel_btn = ctk.CTkButton(
             btns, text="Cancel", command=self.destroy, width=110, height=40,
             fg_color="transparent", hover_color=p["border"], border_width=1,
             border_color=p["border"], text_color=p["muted"], corner_radius=10,
-        ).pack(side="left", padx=10)
+        )
+        cancel_btn.pack(side="left", padx=10)
+        self._register_nav(replace_btn)
+        self._register_nav(copy_btn)
+        self._register_nav(cancel_btn)
 
         ctk.CTkLabel(
-            btns, text="Enter = Replace   ·   Esc = Cancel",
+            btns, text="R=Replace · C=Copy · I=Close · arrows+Enter",
             font=("Segoe UI", 11), text_color=p["muted"]
         ).pack(side="right")
 
-        self.bind("<Return>", lambda e: self._replace())
-        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Key>", self._on_key)
+
+    def _result_replace(self):
+        self._replace()
+
+    def _result_copy(self):
+        self._copy()
+
+    def _result_close(self):
+        self.destroy()
 
     def _replace(self):
         cb = self._on_replace
@@ -194,14 +546,7 @@ class Popup(ctk.CTkToplevel):
         cb(text)
 
     def _apply_translation(self, new_text):
-        self.corrected = new_text
-        try:
-            self.corr_box.configure(state="normal")
-            self.corr_box.delete("1.0", "end")
-            self.corr_box.insert("1.0", new_text)
-            self.corr_box.configure(state="disabled")
-        except Exception:
-            pass
+        self._set_result_text(new_text)
 
 
 class TranslateControl:
@@ -343,7 +688,8 @@ class TranslateControl:
         lang = choice
         self.btn.configure(state="disabled")
         self.status.configure(text=f"Translating to {lang}…", text_color=ACCENT)
-        self.on_translate(lang, self._done)
+        text = getattr(self.owner, "corrected", "")
+        self.on_translate(lang, self._done, text)
 
     def _done(self, new_text, err=None):
         try:
@@ -362,14 +708,16 @@ class TranslateControl:
             pass
 
 
-class ResultOverlay(ctk.CTkToplevel):
+class ResultOverlay(ResultActions, ctk.CTkToplevel):
     """Compact floating toolbar shown near the cursor after a proofread.
 
-    Buttons: Replace / Copy / Ignore. Stays open until the user acts.
+    Buttons: Replace / Copy / Ignore plus an action bar (Proofread, Improve,
+    Explain, More). Stays open until the user acts.
     """
 
     def __init__(self, master, original, corrected, on_replace, on_copy,
-                 provider="", on_translate=None):
+                 provider="", on_translate=None, on_action=None,
+                 action="proofread", action_name=None):
         super().__init__(master)
         p = palette()
         self.overrideredirect(True)
@@ -377,14 +725,18 @@ class ResultOverlay(ctk.CTkToplevel):
         self.attributes("-topmost", True)
         self._on_replace = on_replace
         self._on_copy = on_copy
+        self._on_action = on_action
+        self._action = action
+        self.original = original
         self.corrected = corrected
-
-        preview = corrected if len(corrected) <= 240 else corrected[:240] + "…"
+        self._preview_limit = 240
+        self._compact = True
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=12, pady=(10, 2))
+        title = action_name or action_label(action)
         ctk.CTkLabel(
-            header, text="✦ Proofread", font=("Segoe UI Semibold", 12),
+            header, text=f"✦ {title}", font=("Segoe UI Semibold", 12),
             text_color=ACCENT,
         ).pack(side="left")
         if provider:
@@ -398,40 +750,55 @@ class ResultOverlay(ctk.CTkToplevel):
             font=("Segoe UI", 12),
         )
         box.pack(fill="x", padx=12, pady=(4, 8))
-        box.insert("1.0", preview)
-        box.configure(state="disabled")
-        self.box = box
+        self.corr_box = box
+        self._set_result_text(corrected)
+
+        self._build_action_row(self)
 
         if on_translate:
             self.translate_ctl = TranslateControl(self, self, on_translate, width=132)
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(fill="x", padx=12, pady=(0, 10))
-        ctk.CTkButton(
+        replace_btn = ctk.CTkButton(
             btns, text="Replace", command=self._replace, width=110, height=34,
             fg_color=ACCENT, hover_color="#3a76e0", corner_radius=8,
             font=("Segoe UI Semibold", 12),
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
+        )
+        replace_btn.pack(side="left", padx=(0, 6))
+        copy_btn = ctk.CTkButton(
             btns, text="Copy", command=self._copy, width=80, height=34,
             fg_color=p["card2"], hover_color=p["border"], border_width=1,
             border_color=p["border"], text_color=p["text"], corner_radius=8,
-        ).pack(side="left", padx=6)
-        ctk.CTkButton(
+        )
+        copy_btn.pack(side="left", padx=6)
+        close_btn = ctk.CTkButton(
             btns, text="Ignore", command=self.destroy, width=80, height=34,
             fg_color="transparent", hover_color=p["border"], border_width=1,
             border_color=p["border"], text_color=p["muted"], corner_radius=8,
-        ).pack(side="left", padx=6)
+        )
+        close_btn.pack(side="left", padx=6)
+        self._register_nav(replace_btn)
+        self._register_nav(copy_btn)
+        self._register_nav(close_btn)
         ctk.CTkLabel(
-            btns, text="Enter=Replace · Esc=Ignore",
+            btns, text="R/C/I · arrows+Enter · Esc",
             font=("Segoe UI", 10), text_color=p["muted"],
         ).pack(side="right")
 
-        self.bind("<Return>", lambda e: self._replace())
-        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Key>", self._on_key)
 
         self._place_near_cursor()
         self.after_idle(self.focus_force)
+
+    def _result_replace(self):
+        self._replace()
+
+    def _result_copy(self):
+        self._copy()
+
+    def _result_close(self):
+        self.destroy()
 
     def _place_near_cursor(self):
         try:
@@ -471,22 +838,262 @@ class ResultOverlay(ctk.CTkToplevel):
         cb(text)
 
     def _apply_translation(self, new_text):
-        self.corrected = new_text
+        self._set_result_text(new_text)
+
+
+def palette_items() -> list:
+    items = []
+    for aid, spec in ACTIONS.items():
+        items.append({"id": f"action:{aid}", "label": spec["label"], "group": "Actions"})
+    for label, hint in SUMMARIZE_PRESETS:
+        items.append({"id": f"summary:{hint}", "label": label, "group": "Summarize"})
+    for i, cmd in enumerate(get("my_commands") or []):
+        name = str(cmd.get("name") or "").strip()
+        if name:
+            items.append({"id": f"command:{i}", "label": name, "group": "My Commands"})
+    items.append({"id": "undo", "label": "Undo last replace", "group": "Utilities"})
+    items.append({"id": "settings", "label": "Open Settings", "group": "Utilities"})
+    return items
+
+
+class CommandPalette(ctk.CTkToplevel):
+    """Fuzzy-search launcher: pick an action, then it runs on the selection."""
+
+    MAX_ROWS = 10
+
+    def __init__(self, master, on_pick):
+        super().__init__(master)
+        p = palette()
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(fg_color=p["card"])
+        self._on_pick = on_pick
+        self._items = palette_items()
+        self._filtered = list(self._items)
+        self._sel = 0
+        self._rows = []
+
+        width = 540
+        self.entry = ctk.CTkEntry(
+            self, height=46, width=width, corner_radius=10,
+            fg_color=p["card2"], border_color=ACCENT, text_color=p["text"],
+            placeholder_text="What do you want to do?  type to filter · ↑↓ · Enter",
+            font=("Segoe UI", 14),
+        )
+        self.entry.pack(fill="x", padx=12, pady=(12, 6))
+
+        self.scroll = ctk.CTkScrollableFrame(
+            self, width=width, height=330, fg_color="transparent",
+            scrollbar_button_color=p["border"],
+        )
+        self.scroll.pack(fill="both", padx=12, pady=(0, 6))
+
+        self._render_rows()
+        self.bind("<Key>", self._on_key)
+        self.entry.bind("<KeyRelease>", lambda e: self._refilter())
+
+        self._center(width)
+        self.after_idle(lambda: (self.focus_force(), self.entry.focus_set()))
+
+    def _center(self, width):
         try:
-            preview = new_text if len(new_text) <= 240 else new_text[:240] + "…"
-            self.box.configure(state="normal")
-            self.box.delete("1.0", "end")
-            self.box.insert("1.0", preview)
-            self.box.configure(state="disabled")
+            self.update_idletasks()
+            sw = self.winfo_screenwidth()
+            h = self.winfo_reqheight() or 400
+            x = max(8, (sw - width) // 2)
+            y = max(40, int(self.winfo_screenheight() * 0.18))
+            self.geometry(f"{width}x{h}+{x}+{y}")
+        except Exception:
+            self.geometry(f"540x400+200+150")
+
+    def _refilter(self):
+        query = self.entry.get()
+        scored = []
+        for item in self._items:
+            s = _fuzzy_score(query, item["label"])
+            if s >= 0:
+                scored.append((s, item))
+        scored.sort(key=lambda pair: -pair[0])
+        self._filtered = [item for _s, item in scored]
+        self._sel = 0
+        self._render_rows()
+
+    def _render_rows(self):
+        for row in self._rows:
+            try:
+                row.destroy()
+            except Exception:
+                pass
+        self._rows = []
+        p = palette()
+        if not self._filtered:
+            lbl = ctk.CTkLabel(
+                self.scroll, text="No match", font=("Segoe UI", 12),
+                text_color=p["muted"],
+            )
+            lbl.pack(pady=14)
+            self._rows.append(lbl)
+            return
+        self._sel = max(0, min(self._sel, len(self._filtered) - 1))
+        for idx, item in enumerate(self._filtered[: self.MAX_ROWS]):
+            is_sel = idx == self._sel
+            btn = ctk.CTkButton(
+                self.scroll, text=f"{item['label']}   ·  {item['group']}",
+                anchor="w", height=32, corner_radius=8,
+                fg_color=ACCENT_SOFT if is_sel else "transparent",
+                border_width=1,
+                border_color=ACCENT if is_sel else p["border"],
+                text_color=p["text"], font=("Segoe UI", 12),
+                hover_color=p["sidebar_hover"],
+                command=lambda i=idx: self._pick_idx(i),
+            )
+            btn.pack(fill="x", pady=1)
+            self._rows.append(btn)
+
+    def _move(self, delta):
+        if not self._filtered:
+            return
+        visible = min(len(self._filtered), self.MAX_ROWS)
+        self._sel = (self._sel + delta) % visible
+        self._render_rows()
+
+    def _pick_idx(self, idx):
+        if idx < 0 or idx >= len(self._filtered):
+            return
+        pick_id = self._filtered[idx]["id"]
+        try:
+            self.destroy()
         except Exception:
             pass
+        self._on_pick(pick_id)
+
+    def _on_key(self, event):
+        k = (event.keysym or "").lower()
+        if k in ("down",):
+            self._move(1)
+            return "break"
+        if k in ("up",):
+            self._move(-1)
+            return "break"
+        if k in ("return", "kp_enter"):
+            self._pick_idx(self._sel)
+            return "break"
+        if k == "escape":
+            self.destroy()
+            return "break"
+        return None
+
+
+_open_palette_ref = {"win": None}
+
+
+def open_command_palette(master, on_pick):
+    existing = _open_palette_ref.get("win")
+    if existing is not None:
+        try:
+            if existing.winfo_exists():
+                existing.focus_force()
+                return existing
+        except Exception:
+            pass
+    win = CommandPalette(master, on_pick)
+    _open_palette_ref["win"] = win
+    return win
+
+
+class RegionSelector(ctk.CTkToplevel):
+    """Fullscreen drag-to-select overlay for screenshot OCR.
+
+    Calls on_done((x0, y0, x1, y1)) or on_done(None) on cancel.
+    """
+
+    MIN_SIZE = 8
+
+    def __init__(self, master, on_done):
+        super().__init__(master)
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self._on_done = on_done
+        self._start = None
+        self._rect = None
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{sw}x{sh}+0+0")
+        try:
+            self.attributes("-alpha", 0.35)
+        except Exception:
+            pass
+        self.configure(fg_color="#0b0f14")
+
+        self.canvas = tk.Canvas(
+            self, bg="#0b0f14", highlightthickness=0, cursor="crosshair"
+        )
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.create_text(
+            sw // 2, 46,
+            text="Drag to select text  ·  Esc or right-click to cancel",
+            fill="#e8edf7", font=("Segoe UI", 14, "bold"),
+        )
+
+        self.canvas.bind("<ButtonPress-1>", self._press)
+        self.canvas.bind("<B1-Motion>", self._drag)
+        self.canvas.bind("<ButtonRelease-1>", self._release)
+        self.bind("<Escape>", lambda e: self._cancel())
+        self.canvas.bind("<ButtonPress-3>", lambda e: self._cancel())
+        self.after_idle(self.focus_force)
+
+    def _press(self, event):
+        self._start = (event.x, event.y)
+        self._rect = self.canvas.create_rectangle(
+            event.x, event.y, event.x, event.y,
+            outline=ACCENT, width=2,
+        )
+
+    def _drag(self, event):
+        if self._start is None or self._rect is None:
+            return
+        self.canvas.coords(
+            self._rect, self._start[0], self._start[1], event.x, event.y
+        )
+
+    def _release(self, event):
+        if self._start is None:
+            return
+        x0, y0 = self._start
+        x1, y1 = event.x, event.y
+        self._start = None
+        bbox = (
+            min(x0, x1),
+            min(y0, y1),
+            max(x0, x1),
+            max(y0, y1),
+        )
+        valid = (bbox[2] - bbox[0]) >= self.MIN_SIZE and (bbox[3] - bbox[1]) >= self.MIN_SIZE
+        done = self._on_done
+        try:
+            self.destroy()
+        except Exception:
+            pass
+        done(bbox if valid else None)
+
+    def _cancel(self):
+        done = self._on_done
+        self._start = None
+        try:
+            self.destroy()
+        except Exception:
+            pass
+        done(None)
+
+
+def open_region_selector(master, on_done):
+    return RegionSelector(master, on_done)
 
 
 class LoadingPopup(ctk.CTkToplevel):
     def __init__(self, master):
         super().__init__(master)
         p = palette()
-        self.title("AI Proofreader")
+        self.title("TextMate AI")
         self.geometry("340x150")
         self.resizable(False, False)
         self.configure(fg_color=p["bg"])
@@ -498,7 +1105,7 @@ class LoadingPopup(ctk.CTkToplevel):
 
         card = Card(self)
         card.pack(fill="both", expand=True, padx=14, pady=14)
-        ctk.CTkLabel(card, text="AI Proofreader", font=("Segoe UI", 11), text_color=p["muted"]).pack(
+        ctk.CTkLabel(card, text="TextMate AI", font=("Segoe UI", 11), text_color=p["muted"]).pack(
             pady=(18, 4)
         )
         self._label = ctk.CTkLabel(
@@ -555,7 +1162,7 @@ class LoadingPopup(ctk.CTkToplevel):
 def show_message(master, title, message, error=False):
     p = palette()
     win = ctk.CTkToplevel(master)
-    win.title("AI Proofreader")
+    win.title("TextMate AI")
     win.geometry("460x210")
     win.configure(fg_color=p["bg"])
     win.attributes("-topmost", True)
@@ -729,17 +1336,30 @@ GUIDE_STEPS = [
     {"n": "03", "title": "AI fixes grammar & tone",
       "body": "Free LLM providers correct grammar and tone in any language — with automatic fallback."},
     {"n": "04", "title": "Review & replace",
-     "body": "A clean popup shows original vs corrected. Press Enter to Replace, or Copy / Cancel."},
-    {"n": "05", "title": "Setup — Get a free API key",
+     "body": "A clean popup shows original vs result — changed words are highlighted. "
+             "Press Enter to Replace, or Copy / Cancel. Keyboard: R, C, I, arrows+Enter."},
+    {"n": "05", "title": "More AI actions",
+     "body": "In the result window use Proofread · Improve · Explain, or open More ▾ for "
+             "Fix grammar only, Clean up fillers, Format, Summarize, Make a prompt, "
+             "and your own My Commands."},
+    {"n": "06", "title": "Command palette",
+     "body": "Press Ctrl + Alt + Space for a search box over every action — "
+             "type \"email\", \"assamese\" or \"simple\" and hit Enter, "
+             "then select the text you want it applied to."},
+    {"n": "07", "title": "Screenshot OCR",
+     "body": "Press Ctrl + Alt + O, drag over any text on screen (image, PDF, video frame) — "
+             "OCR reads it and opens the normal result window."},
+    {"n": "08", "title": "Setup — Get a free API key",
      "body": "Open Settings → Providers → click \"Get key\" next to Groq (or Gemini / NVIDIA / DeepSeek). "
              "Create a free account and copy your API key. Groq is recommended — fast and free. "
              "You bring your own key; nothing is bundled with the app."},
-    {"n": "06", "title": "Setup — Paste key & Save",
+    {"n": "09", "title": "Setup — Paste key & Save",
      "body": "Back in Settings → Providers, paste the key into the provider field, click Test (optional), "
              "then Save changes. No restart needed — the hotkey works immediately."},
-    {"n": "07", "title": "Runs quietly in the tray",
+    {"n": "10", "title": "Runs quietly in the tray",
      "body": "Close the window to hide to tray. Reopen anytime by double-clicking the tray icon. "
-             "App keeps listening for the hotkey in the background."},
+             "App keeps listening for the hotkey in the background. Ctrl + Alt + U undoes "
+             "the last Replace."},
 ]
 
 
@@ -943,6 +1563,31 @@ class SettingsPage(ctk.CTkFrame):
             text_color=p["text"], font=("Segoe UI", 13),
         ).pack(fill="x", padx=18, pady=(0, 18))
 
+        cmds = Card(scroll)
+        cmds.pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(cmds, text="My Commands", font=("Segoe UI Semibold", 15),
+                     text_color=p["text"]).pack(anchor="w", padx=18, pady=(16, 2))
+        ctk.CTkLabel(
+            cmds,
+            text="Custom AI commands — appear under “More ▾” in the result "
+                 "window and in the command palette (Ctrl+Alt+Space).",
+            font=("Segoe UI", 12), text_color=p["muted"],
+            justify="left", wraplength=520,
+        ).pack(anchor="w", padx=18, pady=(0, 8))
+        self.cmd_list = ctk.CTkFrame(cmds, fg_color="transparent")
+        self.cmd_list.pack(fill="x", padx=18, pady=(0, 6))
+        self.cmd_rows = []
+        for cmd in settings.get("my_commands") or []:
+            self._add_cmd_row(
+                name=str(cmd.get("name") or ""),
+                prompt=str(cmd.get("prompt") or ""),
+            )
+        ctk.CTkButton(
+            cmds, text="+ Add command", width=130, height=34, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color=ACCENT,
+            text_color=ACCENT, hover_color=p["card"], command=self._add_cmd_row,
+        ).pack(anchor="w", padx=18, pady=(2, 16))
+
         prov = Card(scroll)
         prov.pack(fill="x", pady=(0, 12))
         ctk.CTkLabel(prov, text="Providers", font=("Segoe UI Semibold", 15),
@@ -1126,6 +1771,42 @@ class SettingsPage(ctk.CTkFrame):
         self.test_status.configure(text=f"Testing {PROVIDER_LABELS[name]}…")
         threading.Thread(target=run, daemon=True).start()
 
+    def _add_cmd_row(self, name="", prompt=""):
+        p = palette()
+        row = ctk.CTkFrame(
+            self.cmd_list, fg_color=p["card2"], corner_radius=8,
+            border_width=1, border_color=p["border"],
+        )
+        row.pack(fill="x", pady=3)
+        name_var = ctk.StringVar(value=name)
+        prompt_var = ctk.StringVar(value=prompt)
+        ctk.CTkEntry(
+            row, textvariable=name_var, width=150, height=32, corner_radius=6,
+            fg_color=p["card"], border_color=p["border"], text_color=p["text"],
+            placeholder_text="Name",
+        ).pack(side="left", padx=(8, 4), pady=6)
+        ctk.CTkEntry(
+            row, textvariable=prompt_var, height=32, corner_radius=6,
+            fg_color=p["card"], border_color=p["border"], text_color=p["text"],
+            placeholder_text="Instruction — what should the AI do with the selected text?",
+        ).pack(side="left", fill="x", expand=True, padx=(0, 4), pady=6)
+        rec = {"name": name_var, "prompt": prompt_var, "row": row}
+
+        def remove(r=rec):
+            try:
+                r["row"].destroy()
+            except Exception:
+                pass
+            if r in self.cmd_rows:
+                self.cmd_rows.remove(r)
+
+        ctk.CTkButton(
+            row, text="✕", width=28, height=28, corner_radius=6,
+            fg_color="transparent", hover_color=DANGER,
+            text_color=p["muted"], command=remove,
+        ).pack(side="right", padx=(0, 6), pady=6)
+        self.cmd_rows.append(rec)
+
     def save(self):
         settings = load_settings()
         settings["hotkey"] = (self.hotkey_var.get() or "").strip().lower() or "ctrl+alt+z"
@@ -1136,6 +1817,13 @@ class SettingsPage(ctk.CTkFrame):
         settings["api_keys"] = {
             name: (var.get() or "").strip() for name, var in self.key_entries.items()
         }
+        commands = []
+        for rec in self.cmd_rows:
+            cname = (rec["name"].get() or "").strip()
+            cprompt = (rec["prompt"].get() or "").strip()
+            if cname and cprompt:
+                commands.append({"name": cname, "prompt": cprompt})
+        settings["my_commands"] = commands
         tone_label = self.tone_var.get()
         inv = {v: k for k, v in self._tone_labels.items()}
         settings["tone"] = inv.get(tone_label, "professional")
@@ -1272,7 +1960,7 @@ class AboutPage(ctk.CTkFrame):
         ).pack(side="left", padx=(0, 14))
         info = ctk.CTkFrame(row, fg_color="transparent")
         info.pack(side="left")
-        ctk.CTkLabel(info, text="AI Proofreader", font=("Segoe UI Semibold", 20),
+        ctk.CTkLabel(info, text="TextMate AI", font=("Segoe UI Semibold", 20),
                      text_color=p["text"]).pack(anchor="w")
         ctk.CTkLabel(info, text="Universal desktop grammar assistant",
                      font=("Segoe UI", 13), text_color=p["muted"]).pack(anchor="w")
@@ -1776,7 +2464,7 @@ class ActivationPage(ctk.CTkFrame):
         ).pack(pady=(28, 6))
         ctk.CTkLabel(
             card,
-            text="Activate AI Proofreader",
+            text="Activate TextMate AI",
             font=("Segoe UI Semibold", 20),
             text_color=p["text"],
         ).pack(pady=(0, 6))
@@ -1852,7 +2540,7 @@ class MainWindow(ctk.CTk):
     def __init__(self, app_callbacks):
         super().__init__()
         self.app_callbacks = app_callbacks
-        self.title("AI Proofreader")
+        self.title("TextMate AI")
         self.geometry("960x660")
         self.minsize(860, 580)
         self._current_page = "home"
@@ -1924,7 +2612,7 @@ class MainWindow(ctk.CTk):
         texts = ctk.CTkFrame(brand, fg_color="transparent")
         texts.pack(side="left")
         ctk.CTkLabel(
-            texts, text="AI Proofreader", font=("Segoe UI Semibold", 15),
+            texts, text="TextMate AI", font=("Segoe UI Semibold", 15),
             text_color="white", anchor="w",
         ).pack(anchor="w")
         ctk.CTkLabel(

@@ -15,7 +15,7 @@ from config import VERSION, get, is_frozen
 log = logging.getLogger(__name__)
 
 # Default GitHub repo for auto-updates (owner/name)
-DEFAULT_UPDATE_REPO = "HITESHDAS-01/ai-proofreader-releases"
+DEFAULT_UPDATE_REPO = "HITESHDAS-01/textmate-ai-releases"
 
 
 def current_version() -> str:
@@ -59,7 +59,7 @@ def check_for_update() -> dict | None:
     resp = requests.get(
         url,
         timeout=15,
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "AI-Proofreader"},
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "TextMate-AI"},
     )
     resp.raise_for_status()
     data = resp.json()
@@ -101,9 +101,9 @@ def download_update(info: dict, progress_cb=None) -> Path:
     url = info["url"]
     if info.get("needs_manual"):
         raise RuntimeError("manual download required")
-    tmp_dir = Path(tempfile.gettempdir()) / "AIProofreader_update"
+    tmp_dir = Path(tempfile.gettempdir()) / "TextMateAI_update"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    dest = tmp_dir / "AI_Proofreader.exe.new"
+    dest = tmp_dir / "TextMate_AI.exe.new"
     with requests.get(url, stream=True, timeout=120) as r:
         r.raise_for_status()
         total = int(r.headers.get("Content-Length") or 0)
@@ -128,7 +128,7 @@ def download_update(info: dict, progress_cb=None) -> Path:
 
 def _write_apply_script(new_exe: Path, target: Path) -> Path:
     """Write a bat that waits for this process to exit, then swaps the exe."""
-    scripts_dir = Path(tempfile.gettempdir()) / "AIProofreader_update"
+    scripts_dir = Path(tempfile.gettempdir()) / "TextMateAI_update"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     bat = scripts_dir / "apply_update.bat"
     pid = os.getpid()

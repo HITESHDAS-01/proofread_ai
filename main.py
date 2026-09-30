@@ -26,8 +26,9 @@ _busy = False
 _root = None
 _loading = None
 _icon = None
-_hotkey_hook = None
+_hotkey_hooks = {}
 _ui_queue = queue.Queue()
+_last_replace = None  # {"fg": hwnd} of the most recent Replace action
 
 
 def setup_logging():
@@ -71,7 +72,7 @@ def _pump_ui():
 def acquire_single_instance():
     if sys.platform != "win32":
         return True
-    ctypes.windll.kernel32.CreateMutexW(None, False, "AIProofreader_SingleInstance")
+    ctypes.windll.kernel32.CreateMutexW(None, False, "TextMateAI_SingleInstance")
     return ctypes.windll.kernel32.GetLastError() != 183
 
 
@@ -470,6 +471,7 @@ def capture_selected_text(pre_fg=None):
 
 
 def replace_text(corrected, original_clip, fg):
+    global _last_replace
     _set_foreground(fg)
     time.sleep(0.12)
     pyperclip.copy(corrected)
@@ -478,6 +480,30 @@ def replace_text(corrected, original_clip, fg):
     time.sleep(0.35)
     if original_clip is not None:
         pyperclip.copy(original_clip)
+    if fg:
+        _last_replace = {"fg": fg, "text": corrected, "ts": time.time()}
+        log.info("replace recorded for undo (fg=%s)", fg)
+
+
+def undo_last_replace():
+    """Send Ctrl+Z to the window where the last Replace happened."""
+    global _last_replace
+    from ui import show_message
+
+    if not _last_replace:
+        ui(show_message, "Undo", "Nothing to undo yet — no recent Replace.")
+        return
+    fg = _last_replace.get("fg")
+    _last_replace = None
+    if fg:
+        _set_foreground(fg)
+        time.sleep(0.15)
+        keyboard.send("ctrl+z")
+        time.sleep(0.2)
+        log.info("undo: ctrl+z sent to fg=%s", fg)
+        ui(show_message, "Undo", "Last Replace undone (Ctrl+Z sent).")
+    else:
+        ui(show_message, "Undo", "Cannot undo: source window unknown.")
 
 
 def copy_text(corrected):
@@ -502,7 +528,15 @@ def _show_loading():
     _loading = LoadingPopup(_root)
 
 
-def _show_popup(original, corrected, original_clip, fg, provider=""):
+def _show_popup(
+    original,
+    corrected,
+    original_clip,
+    fg,
+    provider="",
+    action="proofread",
+    action_name=None,
+):
     base = corrected
 
     def on_replace(text=None):
@@ -511,11 +545,13 @@ def _show_popup(original, corrected, original_clip, fg, provider=""):
     def on_copy(text=None):
         copy_text(text if text is not None else base)
 
-    def on_translate(lang, done_cb):
+    def on_translate(lang, done_cb, text=None):
+        source = text if text else base
+
         def work():
             try:
                 prompt = config.build_system_prompt(translate_to=lang)
-                new = check_text(base, prompt)
+                new = check_text(source, prompt)
                 if not new or not str(new).strip():
                     raise ValueError("empty translation")
                 ui(done_cb, str(new).strip(), None)
@@ -525,16 +561,56 @@ def _show_popup(original, corrected, original_clip, fg, provider=""):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def on_action(spec, done_cb):
+        """Re-run the source text through a different action (in-place)."""
+
+        def work():
+            try:
+                prompt = _prompt_for(spec)
+                new = check_text(original, prompt)
+                if not new or not str(new).strip():
+                    raise ValueError("empty response")
+                new = str(new).strip()
+                label = spec.get("name") or config.action_label(
+                    spec.get("action", "proofread")
+                )
+                history_store.add(original, new, llm.LAST_PROVIDER, action=label)
+                ui(done_cb, new, None, llm.LAST_PROVIDER)
+            except Exception as exc:
+                log.warning("action rerun failed (%s): %s", spec, exc)
+                ui(done_cb, None, str(exc), "")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    kwargs = dict(
+        on_replace=on_replace,
+        on_copy=on_copy,
+        provider=provider,
+        on_translate=on_translate,
+        on_action=on_action,
+        action=action,
+        action_name=action_name,
+    )
     if get("result_ui", "overlay") == "popup":
         from ui import Popup
 
-        Popup(_root, original, corrected, on_replace=on_replace, on_copy=on_copy,
-              provider=provider, on_translate=on_translate)
+        Popup(_root, original, corrected, **kwargs)
     else:
         from ui import ResultOverlay
 
-        ResultOverlay(_root, original, corrected, on_replace=on_replace,
-                      on_copy=on_copy, provider=provider, on_translate=on_translate)
+        ResultOverlay(_root, original, corrected, **kwargs)
+
+
+def _prompt_for(spec: dict) -> str:
+    """Build the system prompt for an action spec.
+
+    spec: {"action": id, "hint": str} or {"command": prompt_text, "name": str}
+    """
+    command = str(spec.get("command") or "").strip()
+    if command:
+        return config.custom_prompt_system(command)
+    action = spec.get("action") or "proofread"
+    return config.build_system_prompt(action=action, hint=spec.get("hint") or "")
 
 
 def _show_error(message):
@@ -569,13 +645,25 @@ def _background_update_check():
     updater.check_async(on_result)
 
 
-def proofread_worker(text, original_clip, fg):
+def run_action(
+    text,
+    original_clip,
+    fg,
+    action="proofread",
+    hint="",
+    command=None,
+    command_name=None,
+    force_popup=False,
+):
+    """Run an AI action on `text` and show the result UI when done."""
     result = {"text": "", "error": "", "provider": ""}
     try:
-        result["text"] = check_text(text)
+        spec = {"action": action, "hint": hint}
+        prompt = config.custom_prompt_system(command) if command else _prompt_for(spec)
+        result["text"] = check_text(text, prompt)
         result["provider"] = llm.LAST_PROVIDER
     except Exception as exc:
-        log.error("proofread failed: %s", exc)
+        log.error("action %s failed: %s", action, exc)
         result["error"] = str(exc)
 
     def done():
@@ -583,11 +671,21 @@ def proofread_worker(text, original_clip, fg):
         if result["error"]:
             _show_error(result["error"])
             return
-        history_store.add(text, result["text"], result["provider"])
-        if get("auto_replace"):
+        label = command_name or command or config.action_label(action)
+        history_store.add(text, result["text"], result["provider"], action=label)
+        kind = config.action_kind(action)
+        if get("auto_replace") and kind == "edit" and not command and not force_popup:
             replace_text(result["text"], original_clip, fg)
         else:
-            _show_popup(text, result["text"], original_clip, fg, result["provider"])
+            _show_popup(
+                text,
+                result["text"],
+                original_clip,
+                fg,
+                result["provider"],
+                action=action,
+                action_name=label if command else None,
+            )
         _refresh_home()
 
     ui(done)
@@ -601,35 +699,30 @@ def _refresh_home():
         pass
 
 
-def on_hotkey():
-    global _busy
-    log.info("hotkey pressed enabled=%s busy=%s", ENABLED, _busy)
-    if not ENABLED or _busy:
-        log.info("hotkey ignored: enabled=%s busy=%s", ENABLED, _busy)
-        return
+def _ensure_ready() -> bool:
+    """Shared pre-flight checks for AI flows. Shows an error dialog on failure."""
     try:
         from ui import is_app_activated
 
         if not is_app_activated():
-            log.info("hotkey ignored: not activated")
+            log.info("flow ignored: not activated")
             ui(
                 _show_error,
-                "AI Proofreader is not activated. Open the app and enter your access key.",
+                "TextMate AI is not activated. Open the app and enter your access key.",
             )
-            return
+            return False
     except Exception:
         log.exception("activation check failed")
         if not get("activated", False):
-            log.info("hotkey ignored: not activated (fallback)")
             ui(
                 _show_error,
-                "AI Proofreader is not activated. Open the app and enter your access key.",
+                "TextMate AI is not activated. Open the app and enter your access key.",
             )
-            return
+            return False
     providers = available_providers()
     if not providers:
         log.info(
-            "hotkey ignored: no providers (settings_keys=%s)",
+            "flow ignored: no providers (settings_keys=%s)",
             sorted(
                 k for k, v in (load_settings().get("api_keys") or {}).items() if v
             ),
@@ -639,13 +732,26 @@ def on_hotkey():
             "No API keys configured (bring your own key). Open Settings → Providers "
             "and add at least one key.",
         )
+        return False
+    return True
+
+
+def start_flow(action="proofread", hint="", command=None, command_name=None):
+    """Capture the current selection and run `action` on it.
+
+    Falls back to the clipboard when selection capture fails.
+    """
+    global _busy
+    log.info("start_flow action=%s enabled=%s busy=%s", action, ENABLED, _busy)
+    if not ENABLED or _busy:
+        log.info("flow ignored: enabled=%s busy=%s", ENABLED, _busy)
         return
-    log.info("hotkey accepted providers=%s", providers)
+    if not _ensure_ready():
+        return
     # Capture source window BEFORE any of our UI is created
     pre_fg = _get_foreground()
     if _is_our_window(pre_fg):
         pre_fg = None
-    log.info("hotkey: pre_fg=%s our=%s", pre_fg, _is_our_window(pre_fg))
     _busy = True
 
     def run():
@@ -653,20 +759,37 @@ def on_hotkey():
         try:
             # Capture first — no loading window can steal focus
             text, original_clip, fg = capture_selected_text(pre_fg)
+            force_popup = False
             if not text.strip():
-                log.info("no text captured (fg=%s)", bool(fg))
-                ui(
-                    _show_error,
-                    "No text captured. Keep the text selected and make sure "
-                    "the app window (Word/Notepad) is focused, then press the hotkey again.",
-                )
-                return
-            log.info("captured %d chars", len(text))
-            # Loading only after capture, for the API round-trip
+                clip = _read_clipboard()
+                if clip.strip():
+                    log.info("capture empty — falling back to clipboard (%d chars)", len(clip))
+                    text = clip
+                    fg = pre_fg
+                    # Never auto-paste when the source was the clipboard only
+                    force_popup = True
+                else:
+                    log.info("no text captured (fg=%s)", bool(fg))
+                    ui(
+                        _show_error,
+                        "No text captured. Keep the text selected and make sure "
+                        "the app window (Word/Notepad) is focused, then press the hotkey again.",
+                    )
+                    return
+            log.info("captured %d chars action=%s", len(text), action)
             ui(_show_loading)
-            proofread_worker(text, original_clip, fg)
+            run_action(
+                text,
+                original_clip,
+                fg,
+                action=action,
+                hint=hint,
+                command=command,
+                command_name=command_name,
+                force_popup=force_popup,
+            )
         except Exception as exc:
-            log.exception("hotkey handler failed")
+            log.exception("flow handler failed")
             ui(_show_error, str(exc))
         finally:
             _busy = False
@@ -674,20 +797,150 @@ def on_hotkey():
     threading.Thread(target=run, daemon=True).start()
 
 
+def on_hotkey():
+    start_flow("proofread")
+
+
+def on_undo():
+    threading.Thread(
+        target=lambda: undo_last_replace() if not _busy else None, daemon=True
+    ).start()
+
+
+def on_palette():
+    if _busy:
+        return
+    if not _ensure_ready():
+        return
+    from ui import open_command_palette
+
+    def pick(pick_id):
+        def dispatch():
+            time.sleep(0.12)  # let the palette window fully close first
+            ui(_dispatch_palette_pick, pick_id)
+
+        threading.Thread(target=dispatch, daemon=True).start()
+
+    ui(open_command_palette, _root, pick)
+
+
+def _dispatch_palette_pick(pick_id: str):
+    if pick_id == "undo":
+        threading.Thread(target=undo_last_replace, daemon=True).start()
+        return
+    if pick_id == "settings":
+        show_main()
+        return
+    if pick_id.startswith("action:"):
+        start_flow(pick_id.split(":", 1)[1])
+    elif pick_id.startswith("summary:"):
+        start_flow("summarize", hint=pick_id.split(":", 1)[1])
+    elif pick_id.startswith("command:"):
+        try:
+            idx = int(pick_id.split(":", 1)[1])
+            commands = get("my_commands") or []
+            cmd = commands[idx]
+        except Exception:
+            log.exception("palette command lookup failed: %s", pick_id)
+            return
+        start_flow(
+            "proofread",
+            command=cmd.get("prompt", ""),
+            command_name=cmd.get("name", ""),
+        )
+
+
+def on_ocr():
+    """Screenshot OCR flow: drag a region -> OCR -> run action on the text."""
+    global _busy
+    if not ENABLED or _busy:
+        return
+    import ocr as ocr_mod
+
+    if not ocr_mod.available():
+        ui(
+            _show_error,
+            "Screenshot OCR needs Windows PowerShell, which was not found.",
+        )
+        return
+    if not _ensure_ready():
+        return
+    pre_fg = _get_foreground()
+    if _is_our_window(pre_fg):
+        pre_fg = None
+
+    from ui import open_region_selector
+
+    _busy = True
+
+    def on_region(bbox):
+        global _busy
+        if not bbox:
+            # cancelled — release the busy flag
+            _busy = False
+            return
+        threading.Thread(
+            target=lambda: _ocr_worker(bbox, pre_fg), daemon=True
+        ).start()
+
+    ui(open_region_selector, _root, on_region)
+
+
+def _ocr_worker(bbox, pre_fg):
+    global _busy
+    try:
+        import ocr as ocr_mod
+        from PIL import ImageGrab
+
+        img = ImageGrab.grab(bbox=bbox, all_screens=True)
+        ui(_show_loading)
+        text = ocr_mod.recognize(img)
+        if not text.strip():
+            _close_loading()
+            ui(
+                _show_error,
+                "No text found in the selected region. Try a larger or clearer area.",
+            )
+            return
+        log.info("ocr captured %d chars", len(text))
+        original_clip = _read_clipboard()
+        run_action(
+            text,
+            original_clip,
+            pre_fg,
+            action="proofread",
+            force_popup=True,
+        )
+    except Exception as exc:
+        log.exception("ocr flow failed")
+        _close_loading()
+        ui(_show_error, str(exc))
+    finally:
+        _busy = False
+
+
 def rebind_hotkey():
-    global _hotkey_hook
-    hotkey = get("hotkey")
-    try:
-        if _hotkey_hook is not None:
-            keyboard.remove_hotkey(_hotkey_hook)
-    except Exception:
-        pass
-    try:
-        _hotkey_hook = keyboard.add_hotkey(hotkey, on_hotkey)
-        log.info("hotkey bound: %s", hotkey)
-    except Exception:
-        _hotkey_hook = None
-        log.exception("hotkey bind failed: %s", hotkey)
+    global _hotkey_hooks
+    bindings = [
+        ("hotkey", get("hotkey") or "ctrl+alt+z", on_hotkey),
+        ("palette_hotkey", get("palette_hotkey") or "ctrl+alt+space", on_palette),
+        ("ocr_hotkey", get("ocr_hotkey") or "ctrl+alt+o", on_ocr),
+        ("undo_hotkey", get("undo_hotkey") or "ctrl+alt+u", on_undo),
+    ]
+    for key, hook in list(_hotkey_hooks.items()):
+        try:
+            keyboard.remove_hotkey(hook)
+        except Exception:
+            pass
+        _hotkey_hooks.pop(key, None)
+    for key, combo, fn in bindings:
+        if not combo:
+            continue
+        try:
+            _hotkey_hooks[key] = keyboard.add_hotkey(combo, fn)
+            log.info("hotkey bound: %s -> %s", combo, key)
+        except Exception:
+            log.exception("hotkey bind failed: %s (%s)", combo, key)
 
 
 def set_enabled(enabled: bool):
@@ -766,11 +1019,15 @@ def start_tray():
             _tray_enabled,
             checked=lambda item: ENABLED,
         ),
-        pystray.MenuItem("Open AI Proofreader", _tray_open, default=True),
+        pystray.MenuItem(
+            "Undo last replace",
+            lambda icon, item: threading.Thread(target=undo_last_replace, daemon=True).start(),
+        ),
+        pystray.MenuItem("Open TextMate AI", _tray_open, default=True),
         pystray.MenuItem(f"v{VERSION}", None, enabled=False),
         pystray.MenuItem("Quit", _quit),
     )
-    _icon = pystray.Icon("AI Proofreader", _tray_icon_image(), menu=menu)
+    _icon = pystray.Icon("TextMate AI", _tray_icon_image(), menu=menu)
     threading.Thread(target=_icon.run, daemon=True).start()
 
 
@@ -781,8 +1038,8 @@ def main():
         if sys.platform == "win32":
             ctypes.windll.user32.MessageBoxW(
                 None,
-                "AI Proofreader is already running.",
-                "AI Proofreader",
+                "TextMate AI is already running.",
+                "TextMate AI",
                 0x40,
             )
         return
@@ -808,7 +1065,7 @@ def main():
     start_tray()
     _root.after(50, _pump_ui)
     log.info(
-        "AI Proofreader v%s running (hotkey=%s activated=%s)",
+        "TextMate AI v%s running (hotkey=%s activated=%s)",
         VERSION,
         get("hotkey"),
         bool(get("activated", False)),

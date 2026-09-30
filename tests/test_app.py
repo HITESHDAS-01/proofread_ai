@@ -254,10 +254,10 @@ class TestLicense(unittest.TestCase):
 
 class TestInstaller(unittest.TestCase):
     def test_iss_references_exe(self):
-        iss = Path(__file__).resolve().parents[1] / "installer" / "AIProofreader.iss"
+        iss = Path(__file__).resolve().parents[1] / "installer" / "TextMateAI.iss"
         self.assertTrue(iss.is_file())
         text = iss.read_text(encoding="utf-8")
-        self.assertIn("AI_Proofreader.exe", text)
+        self.assertIn("TextMate_AI.exe", text)
         self.assertIn("LICENSE", text)
         self.assertIn("PRIVACY.md", text)
 
@@ -272,7 +272,7 @@ class TestInstaller(unittest.TestCase):
 
     def test_spec_includes_license_privacy(self):
         root = Path(__file__).resolve().parents[1]
-        spec = (root / "AI_Proofreader.spec").read_text(encoding="utf-8")
+        spec = (root / "TextMate_AI.spec").read_text(encoding="utf-8")
         self.assertIn("LICENSE", spec)
         self.assertIn("PRIVACY.md", spec)
 
@@ -314,19 +314,19 @@ class TestUpdater(ConfigTestCase):
     def test_update_repo_setting(self):
         self.config._settings_cache = {
             **self.config.DEFAULT_SETTINGS,
-            "update_repo": "someone/ai-proofreader",
+            "update_repo": "someone/textmate-ai",
             "api_keys": {},
         }
-        self.assertEqual(self.updater.update_repo(), "someone/ai-proofreader")
+        self.assertEqual(self.updater.update_repo(), "someone/textmate-ai")
 
     def test_default_update_repo(self):
         self.assertEqual(
             self.config.DEFAULT_SETTINGS["update_repo"],
-            "HITESHDAS-01/ai-proofreader-releases",
+            "HITESHDAS-01/textmate-ai-releases",
         )
         self.assertEqual(
             self.updater.DEFAULT_UPDATE_REPO,
-            "HITESHDAS-01/ai-proofreader-releases",
+            "HITESHDAS-01/textmate-ai-releases",
         )
 
     def test_update_repo_migration_from_private_repo(self):
@@ -338,7 +338,7 @@ class TestUpdater(ConfigTestCase):
         self.config._settings_cache = None
         self.assertEqual(
             self.config.load_settings()["update_repo"],
-            "HITESHDAS-01/ai-proofreader-releases",
+            "HITESHDAS-01/textmate-ai-releases",
         )
 
     def test_default_auto_update_enabled(self):
@@ -565,6 +565,203 @@ class TestTranslateLanguages(ConfigTestCase):
     def test_no_duplicates_across_groups(self):
         langs = self.config.TRANSLATE_LANGS
         self.assertEqual(len(langs), len(set(langs)))
+
+
+class TestActions(ConfigTestCase):
+    def test_all_actions_have_valid_kinds(self):
+        for aid, spec in self.config.ACTIONS.items():
+            self.assertIn(spec["kind"], ("edit", "info"))
+            self.assertTrue(self.config.action_label(aid))
+            if aid != "proofread":
+                self.assertTrue(spec["rule"].strip())
+        self.assertEqual(self.config.action_kind("explain"), "info")
+        self.assertEqual(self.config.action_kind("improve"), "edit")
+        self.assertEqual(self.config.action_kind("unknown"), "edit")
+
+    def test_explain_is_info_prompt(self):
+        s = self.config.build_system_prompt(
+            action="explain", tone="professional", translate_to="Hindi",
+            ignore_words=[],
+        )
+        self.assertIn(self.config.ACTIONS["explain"]["rule"][:40], s)
+        self.assertIn("preamble", s)
+        # tone/translate clauses are edit-only
+        self.assertNotIn(self.config.TONES["professional"], s)
+        self.assertNotIn("translate the result into Hindi", s)
+
+    def test_improve_keeps_tone_and_language(self):
+        s = self.config.build_system_prompt(
+            action="improve", tone="casual", translate_to="", ignore_words=[],
+        )
+        self.assertIn(self.config.ACTIONS["improve"]["rule"][:40], s)
+        self.assertIn(self.config.TONES["casual"], s)
+        self.assertIn("SAME language", s)
+        self.assertIn("Return ONLY the text", s)
+
+    def test_summarize_hint_appended(self):
+        plain = self.config.build_system_prompt(action="summarize")
+        hinted = self.config.build_system_prompt(
+            action="summarize", hint="Summarize in one sentence."
+        )
+        self.assertIn("one sentence", hinted)
+        self.assertNotEqual(plain, hinted)
+
+    def test_custom_prompt_system(self):
+        s = self.config.custom_prompt_system("Convert to professional email")
+        self.assertIn("Convert to professional email", s)
+        self.assertIn("Return ONLY the result", s)
+
+    def test_summarize_presets_exist(self):
+        self.assertGreaterEqual(len(self.config.SUMMARIZE_PRESETS), 3)
+        for label, hint in self.config.SUMMARIZE_PRESETS:
+            self.assertTrue(label and hint)
+
+
+class TestMyCommands(ConfigTestCase):
+    def test_defaults_present(self):
+        cmds = self.config.load_settings()["my_commands"]
+        self.assertGreaterEqual(len(cmds), 4)
+        for c in cmds:
+            self.assertTrue(c["name"] and c["prompt"])
+
+    def test_sanitize_drops_invalid_entries(self):
+        self.config.settings_file().write_text(
+            json.dumps(
+                {
+                    "my_commands": [
+                        {"name": "", "prompt": "x"},
+                        {"name": "Good", "prompt": "do it"},
+                        "junk",
+                        {"name": "No prompt"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.config._settings_cache = None
+        cmds = self.config.load_settings()["my_commands"]
+        self.assertEqual(cmds, [{"name": "Good", "prompt": "do it"}])
+
+    def test_roundtrip(self):
+        settings = self.config.load_settings()
+        settings["my_commands"] = [{"name": "My cmd", "prompt": "Say hi"}]
+        self.config.save_settings(settings)
+        self.config._settings_cache = None
+        loaded = self.config.load_settings()
+        self.assertEqual(loaded["my_commands"], [{"name": "My cmd", "prompt": "Say hi"}])
+
+    def test_new_hotkey_defaults(self):
+        d = self.config.load_settings()
+        self.assertEqual(d["palette_hotkey"], "ctrl+alt+space")
+        self.assertEqual(d["ocr_hotkey"], "ctrl+alt+o")
+        self.assertEqual(d["undo_hotkey"], "ctrl+alt+u")
+
+
+class TestTextDiff(unittest.TestCase):
+    def setUp(self):
+        import textdiff
+
+        self.td = textdiff
+
+    def test_reconstructs_corrected(self):
+        spans = self.td.diff_spans("he go to offce", "He went to office")
+        rebuilt = "".join(t for t, _ in spans)
+        self.assertEqual(rebuilt, "He went to office")
+
+    def test_changed_words_flagged(self):
+        spans = self.td.diff_spans("bad text here", "good text here")
+        flags = {t.strip(): c for t, c in spans}
+        self.assertTrue(flags.get("good"))
+        self.assertFalse(flags.get("text here", flags.get("text")))
+
+    def test_identical_has_no_changes(self):
+        spans = self.td.diff_spans("same text", "same text")
+        self.assertFalse(self.td.has_changes(spans))
+        self.assertEqual("".join(t for t, _ in spans), "same text")
+
+    def test_preview_limit(self):
+        spans = self.td.diff_spans("a b c d e f", "a b c d e f g h i j")
+        prev = self.td.preview_spans(spans, 6)
+        text = "".join(t for t, _ in prev)
+        self.assertLessEqual(len(text), 6)
+
+
+class TestOCR(unittest.TestCase):
+    def setUp(self):
+        import ocr
+
+        self.ocr = ocr
+        from PIL import Image
+
+        self.image = Image.new("RGB", (20, 10), "white")
+
+    def test_available_is_bool(self):
+        self.assertIsInstance(self.ocr.available(), bool)
+
+    def test_non_windows_raises(self):
+        with mock.patch.object(self.ocr, "available", return_value=False):
+            with self.assertRaises(self.ocr.OcrError):
+                self.ocr.recognize(self.image)
+
+    def test_script_failure_raises(self):
+        def fake_run(*args, **kwargs):
+            return mock.Mock(returncode=1, stderr=b"kapow", stdout=b"")
+
+        with mock.patch.object(self.ocr, "available", return_value=True), \
+                mock.patch.object(self.ocr.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(self.ocr.OcrError):
+                self.ocr.recognize(self.image)
+
+    def test_missing_language_pack_message(self):
+        def fake_run(*args, **kwargs):
+            return mock.Mock(returncode=3, stderr=b"", stdout=b"")
+
+        with mock.patch.object(self.ocr, "available", return_value=True), \
+                mock.patch.object(self.ocr.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(self.ocr.OcrError) as ctx:
+                self.ocr.recognize(self.image)
+        self.assertIn("OCR language", str(ctx.exception))
+
+    def test_success_reads_output_file(self):
+        def fake_run(cmd, **kwargs):
+            out_path = cmd[cmd.index("-OutPath") + 1]
+            with open(out_path, "w", encoding="utf-8") as fh:
+                fh.write("recognized text")
+            return mock.Mock(returncode=0, stderr=b"", stdout=b"")
+
+        with mock.patch.object(self.ocr, "available", return_value=True), \
+                mock.patch.object(self.ocr.subprocess, "run", side_effect=fake_run):
+            text = self.ocr.recognize(self.image)
+        self.assertEqual(text, "recognized text")
+
+
+class TestPaletteUI(unittest.TestCase):
+    def test_fuzzy_match(self):
+        import ui
+
+        self.assertTrue(ui.fuzzy_match("eml", "Professional Email"))
+        self.assertTrue(ui.fuzzy_match("", "anything"))
+        self.assertFalse(ui.fuzzy_match("zzz", "Professional Email"))
+
+    def test_fuzzy_score_orders_prefix_first(self):
+        import ui
+
+        self.assertGreater(
+            ui._fuzzy_score("assamese", "Assamese"),
+            ui._fuzzy_score("assamese", "Translate to Assamese"),
+        )
+
+    def test_palette_items_include_actions_commands_utils(self):
+        import ui
+
+        items = ui.palette_items()
+        ids = [i["id"] for i in items]
+        self.assertIn("action:proofread", ids)
+        self.assertIn("action:explain", ids)
+        self.assertIn("undo", ids)
+        self.assertIn("settings", ids)
+        self.assertTrue(any(i.startswith("command:") for i in ids))
+        self.assertTrue(any(i.startswith("summary:") for i in ids))
 
 
 if __name__ == "__main__":
