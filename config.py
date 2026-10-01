@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 APP_NAME = "TextMate AI"
 APP_ID = "TextMateAI"
 LEGACY_APP_ID = "AIProofreader"
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 
 DEFAULT_MY_COMMANDS = [
     {
@@ -61,6 +61,7 @@ DEFAULT_SETTINGS = {
     "ocr_hotkey": "ctrl+alt+o",
     "undo_hotkey": "ctrl+alt+u",
     "my_commands": DEFAULT_MY_COMMANDS,
+    "main_window_geometry": "",
 }
 
 PROVIDER_LABELS = {
@@ -426,6 +427,8 @@ def load_settings() -> dict:
         merged["tone"] = "professional"
     if not isinstance(merged.get("translate_to"), str):
         merged["translate_to"] = ""
+    if not isinstance(merged.get("main_window_geometry"), str):
+        merged["main_window_geometry"] = ""
     if not isinstance(merged.get("ignore_words"), list):
         merged["ignore_words"] = []
     if merged.get("result_ui") not in ("overlay", "popup"):

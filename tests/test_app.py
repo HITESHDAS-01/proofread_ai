@@ -865,5 +865,71 @@ class TestPaletteUI(unittest.TestCase):
         self.assertTrue(any(i.startswith("summary:") for i in ids))
 
 
+class TestWindowGeometry(unittest.TestCase):
+    DEFAULT = "900x600+233+84"
+
+    def test_empty_saved_centers_default_on_1366x768(self):
+        import ui
+
+        self.assertEqual(
+            ui.choose_window_geometry("", 0, 0, 1366, 768), self.DEFAULT
+        )
+
+    def test_valid_saved_returned_as_is(self):
+        import ui
+
+        self.assertEqual(
+            ui.choose_window_geometry("900x600+100+80", 0, 0, 1366, 768),
+            "900x600+100+80",
+        )
+
+    def test_negative_x_saved_supported(self):
+        import ui
+
+        self.assertEqual(
+            ui.choose_window_geometry("900x600-1500+50", -1920, 0, 3286, 768),
+            "900x600-1500+50",
+        )
+
+    def test_offscreen_saved_recenters(self):
+        import ui
+
+        self.assertEqual(
+            ui.choose_window_geometry("900x600+5000+100", 0, 0, 1366, 768),
+            self.DEFAULT,
+        )
+
+    def test_too_small_saved_recenters(self):
+        import ui
+
+        self.assertEqual(
+            ui.choose_window_geometry("400x300+10+10", 0, 0, 1366, 768),
+            self.DEFAULT,
+        )
+
+    def test_garbage_saved_recenters(self):
+        import ui
+
+        for bad in (None, "junk", "900x600", "", "900x600++10+10"):
+            self.assertEqual(
+                ui.choose_window_geometry(bad, 0, 0, 1366, 768), self.DEFAULT
+            )
+
+    def test_small_screen_caps_and_centers(self):
+        import ui
+
+        self.assertEqual(
+            ui.choose_window_geometry("", 0, 0, 1000, 650), "900x580+50+35"
+        )
+
+    def test_geometry_roundtrips_through_tk_format(self):
+        import ui
+
+        for g in ("900x600+12+34", "900x600-100+50", "912x604-5+30"):
+            self.assertEqual(
+                ui.choose_window_geometry(g, -1920, 0, 3286, 768), g
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

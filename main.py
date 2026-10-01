@@ -1035,6 +1035,11 @@ def _tray_enabled(icon, item):
 
 def _quit(icon, item):
     log.info("quit requested")
+    if _root is not None:
+        try:
+            _root._save_geometry()
+        except Exception:
+            pass
     if _icon is not None:
         _icon.stop()
     try:

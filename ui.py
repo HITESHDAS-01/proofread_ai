@@ -1,3 +1,4 @@
+import re
 import threading
 import tkinter as tk
 
@@ -2758,12 +2759,57 @@ class ActivationPage(ctk.CTkFrame):
         self.app.on_activated()
 
 
+def choose_window_geometry(saved, vx, vy, vw, vh,
+                            def_w=900, def_h=600, min_w=860, min_h=580):
+    """Return a "WxH±X±Y" geometry string.
+
+    Uses the saved geometry if it still fits the (virtual) screen,
+    otherwise a screen-capped default, centered.
+    """
+
+    def fmt(w, h, x, y):
+        def off(v):
+            return f"+{v}" if v >= 0 else str(v)
+
+        return f"{w}x{h}{off(x)}{off(y)}"
+
+    m = re.match(r"^(\d+)x(\d+)([+-])(\d+)([+-])(\d+)$", str(saved or "").strip())
+    if m:
+        rw, rh, sx, rx, sy, ry = m.groups()
+        w, h = int(rw), int(rh)
+        x = int(sx + rx)
+        y = int(sy + ry)
+        if (
+            w >= min_w
+            and h >= min_h
+            and x >= vx - 20
+            and y >= vy - 20
+            and x + w <= vx + vw + 20
+            and y + h <= vy + vh + 20
+        ):
+            return fmt(w, h, x, y)
+    w = max(min_w, min(def_w, vw - 40))
+    h = max(min_h, min(def_h, vh - 70))
+    x = vx + (vw - w) // 2
+    y = vy + (vh - h) // 2
+    return fmt(w, h, x, y)
+
+
 class MainWindow(ctk.CTk):
     def __init__(self, app_callbacks):
         super().__init__()
         self.app_callbacks = app_callbacks
         self.title("TextMate AI")
-        self.geometry("960x660")
+        try:
+            self.geometry(choose_window_geometry(
+                get("main_window_geometry", ""),
+                self.winfo_vrootx(),
+                self.winfo_vrooty(),
+                self.winfo_vrootwidth(),
+                self.winfo_vrootheight(),
+            ))
+        except Exception:
+            self.geometry("900x600")
         self.minsize(860, 580)
         self._current_page = "home"
         self._sidebar = None
@@ -2968,7 +3014,16 @@ class MainWindow(ctk.CTk):
         save_settings(settings)
         self.show_page("home")
 
+    def _save_geometry(self):
+        try:
+            settings = load_settings()
+            settings["main_window_geometry"] = self.geometry()
+            save_settings(settings)
+        except Exception:
+            pass
+
     def hide_to_tray(self):
+        self._save_geometry()
         self.app_callbacks["hide_to_tray"]()
 
     def show_from_tray(self):

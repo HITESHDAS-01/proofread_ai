@@ -2,7 +2,7 @@
 ; Build: iscc installer\TextMateAI.iss  (after pyinstaller build)
 
 #define MyAppName "TextMate AI"
-#define MyAppVersion "1.1.3"
+#define MyAppVersion "1.1.4"
 #define MyAppPublisher "Pranjit Das"
 #define MyAppExeName "TextMate_AI.exe"
 
