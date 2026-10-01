@@ -520,12 +520,12 @@ def _close_loading():
         _loading = None
 
 
-def _show_loading():
+def _show_loading(label="Checking text"):
     global _loading
     from ui import LoadingPopup
 
     _close_loading()
-    _loading = LoadingPopup(_root)
+    _loading = LoadingPopup(_root, text=label)
 
 
 def _show_popup(
@@ -851,16 +851,20 @@ def _dispatch_palette_pick(pick_id: str):
 
 
 def on_ocr():
-    """Screenshot OCR flow: drag a region -> OCR -> run action on the text."""
+    """Screenshot OCR flow: drag a region -> AI OCR -> run action on the text."""
     global _busy
     if not ENABLED or _busy:
         return
     import ocr as ocr_mod
 
-    if not ocr_mod.available():
+    import llm as llm_mod
+
+    if not (llm_mod.vision_available() or ocr_mod.available()):
         ui(
             _show_error,
-            "Screenshot OCR needs Windows PowerShell, which was not found.",
+            "Screenshot OCR needs an AI provider key (Groq/Gemini/OpenAI/"
+            "Claude) for AI OCR, or Windows PowerShell for local OCR. "
+            "Open Settings → Providers and add a key.",
         )
         return
     if not _ensure_ready():
@@ -886,21 +890,66 @@ def on_ocr():
     ui(open_region_selector, _root, on_region)
 
 
+def _prepare_ocr_image(img):
+    """Optimize a screenshot for AI OCR -> (jpeg_b64, size).
+
+    Caps huge captures (API payload limits), upscales tiny ones so small
+    text is readable, and JPEG-compresses to keep base64 small.
+    """
+    import base64
+    from io import BytesIO
+
+    from PIL import Image
+
+    img = img.convert("RGB")
+    w, h = img.size
+    longest = max(w, h)
+    if longest > 1600:
+        scale = 1600 / longest
+    elif longest < 900:
+        scale = min(2.0, 900 / longest)
+    else:
+        scale = 1.0
+    if scale != 1.0:
+        resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), resample)
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=88)
+    return base64.b64encode(buf.getvalue()).decode("ascii"), img.size
+
+
 def _ocr_worker(bbox, pre_fg):
     global _busy
     try:
         import ocr as ocr_mod
+
+        import llm as llm_mod
         from PIL import ImageGrab
 
         img = ImageGrab.grab(bbox=bbox, all_screens=True)
-        ui(_show_loading)
-        text = ocr_mod.recognize(img)
+        use_ai = llm_mod.vision_available()
+        ui(_show_loading, "AI reading image" if use_ai else "Reading image")
+        text = ""
+        ai_err = ""
+        # 1) AI vision OCR (preferred — handles handwriting, styled fonts,
+        #    low-res captures that the local engine struggles with)
+        if use_ai:
+            try:
+                b64, size = _prepare_ocr_image(img)
+                log.info("ai ocr: image %dx%d, %d b64 chars", size[0], size[1], len(b64))
+                text = llm_mod.vision_ocr(b64)
+            except Exception as exc:
+                ai_err = str(exc)
+                log.warning("AI OCR failed, falling back to Windows OCR: %s", exc)
+        # 2) local Windows OCR fallback (works offline)
+        if not text.strip() and ocr_mod.available():
+            text = ocr_mod.recognize(img)
         if not text.strip():
             _close_loading()
-            ui(
-                _show_error,
-                "No text found in the selected region. Try a larger or clearer area.",
-            )
+            msg = "No text found in the selected region. Try a larger or clearer area."
+            if ai_err:
+                msg += f" (AI OCR error: {ai_err})"
+            ui(_show_error, msg)
             return
         log.info("ocr captured %d chars", len(text))
         original_clip = _read_clipboard()

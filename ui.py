@@ -1090,7 +1090,7 @@ def open_region_selector(master, on_done):
 
 
 class LoadingPopup(ctk.CTkToplevel):
-    def __init__(self, master):
+    def __init__(self, master, text="Checking text"):
         super().__init__(master)
         p = palette()
         self.title("TextMate AI")
@@ -1109,7 +1109,7 @@ class LoadingPopup(ctk.CTkToplevel):
             pady=(18, 4)
         )
         self._label = ctk.CTkLabel(
-            card, text="Checking text", font=("Segoe UI Semibold", 15), text_color=p["text"]
+            card, text=text, font=("Segoe UI Semibold", 15), text_color=p["text"]
         )
         self._label.pack()
         self._bar = ctk.CTkProgressBar(card, width=200, height=6, corner_radius=99)
@@ -1348,7 +1348,8 @@ GUIDE_STEPS = [
              "then select the text you want it applied to."},
     {"n": "07", "title": "Screenshot OCR",
      "body": "Press Ctrl + Alt + O, drag over any text on screen (image, PDF, video frame) — "
-             "OCR reads it and opens the normal result window."},
+             "AI reads the picture (Windows OCR as offline fallback) and opens the normal "
+             "result window."},
     {"n": "08", "title": "Setup — Get a free API key",
      "body": "Open Settings → Providers → click \"Get key\" next to Groq (or Gemini / NVIDIA / DeepSeek). "
              "Create a free account and copy your API key. Groq is recommended — fast and free. "

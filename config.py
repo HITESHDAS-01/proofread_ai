@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 APP_NAME = "TextMate AI"
 APP_ID = "TextMateAI"
 LEGACY_APP_ID = "AIProofreader"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 DEFAULT_MY_COMMANDS = [
     {

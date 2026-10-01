@@ -67,7 +67,7 @@ def groq_complete(text, system_prompt):
 def gemini_complete(text, system_prompt):
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        "gemini-1.5-flash:generateContent"
+        "gemini-2.5-flash:generateContent"
     )
     data = _post_json(
         url,
@@ -150,6 +150,165 @@ PROVIDERS = {
     "openai": openai_complete,
     "claude": claude_complete,
 }
+
+# Providers whose API accepts image input (used for screenshot OCR).
+VISION_PROVIDERS = {"groq", "gemini", "openai", "claude"}
+
+VISION_OCR_PROMPT = (
+    "Extract ALL visible text from this image exactly as written. "
+    "Preserve line breaks, reading order, punctuation and capitalization. "
+    "Return ONLY the extracted text with no commentary, labels or quotes."
+)
+
+
+def _vision_request(name, image_b64):
+    """Send an image + OCR prompt to a vision-capable provider."""
+    if name == "groq":
+        data = _post_json(
+            "https://api.groq.com/openai/v1/chat/completions",
+            {"Authorization": f"Bearer {API_KEYS['groq']}"},
+            {
+                "model": "qwen/qwen3.8-27b",  # multimodal: accepts images
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": VISION_OCR_PROMPT},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_b64}"
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "max_tokens": 4096,
+            },
+        )
+        return data["choices"][0]["message"]["content"].strip()
+    if name == "gemini":
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-2.5-flash:generateContent"
+        )
+        data = _post_json(
+            url,
+            {"x-goog-api-key": API_KEYS["gemini"]},
+            {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": VISION_OCR_PROMPT},
+                            {
+                                "inline_data": {
+                                    "mime_type": "image/jpeg",
+                                    "data": image_b64,
+                                }
+                            },
+                        ]
+                    }
+                ]
+            },
+        )
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    if name == "openai":
+        data = _post_json(
+            "https://api.openai.com/v1/chat/completions",
+            {"Authorization": f"Bearer {API_KEYS['openai']}"},
+            {
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": VISION_OCR_PROMPT},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_b64}"
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "max_tokens": 4096,
+            },
+        )
+        return data["choices"][0]["message"]["content"].strip()
+    if name == "claude":
+        data = _post_json(
+            "https://api.anthropic.com/v1/messages",
+            {
+                "x-api-key": API_KEYS["claude"],
+                "anthropic-version": "2023-06-01",
+            },
+            {
+                "model": "claude-3-5-haiku-latest",
+                "max_tokens": 4096,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": image_b64,
+                                },
+                            },
+                            {"type": "text", "text": VISION_OCR_PROMPT},
+                        ],
+                    }
+                ],
+            },
+        )
+        return data["content"][0]["text"].strip()
+    raise ProviderError(f"{name}: no vision support")
+
+
+def vision_available(order=None):
+    if order is None:
+        order = get("provider_order")
+    return any(name in VISION_PROVIDERS and API_KEYS.get(name) for name in order)
+
+
+def vision_ocr(image_b64):
+    """AI-based OCR: iterate vision-capable providers, return extracted text.
+
+    Failures are logged but NOT recorded in provider_stats (shared with the
+    text path, so a vision failure must not sink a provider's text ranking).
+    """
+    global LAST_PROVIDER
+    order = smart_sort_order(get("provider_order"))
+    errors = []
+    tried = False
+    for name in order:
+        if name not in VISION_PROVIDERS:
+            continue
+        if not API_KEYS.get(name):
+            errors.append(f"{name}: missing API key")
+            continue
+        tried = True
+        log.info("trying vision provider: %s", name)
+        t0 = time.time()
+        try:
+            text = _vision_request(name, image_b64)
+            if not text:
+                raise ProviderError("empty response")
+            LAST_PROVIDER = name
+            log.info("vision ocr via %s in %.2fs", name, time.time() - t0)
+            return text
+        except Exception as exc:
+            log.warning("vision ocr %s failed: %s", name, exc)
+            errors.append(f"{name}: {exc}")
+    if not tried:
+        raise ProviderError(
+            "No vision-capable provider key configured "
+            "(Groq/Gemini/OpenAI/Claude)."
+        )
+    raise ProviderError("AI OCR failed -> " + " | ".join(errors))
 
 
 def available_providers(order=None):

@@ -735,6 +735,97 @@ class TestOCR(unittest.TestCase):
         self.assertEqual(text, "recognized text")
 
 
+class TestVisionOCR(ConfigTestCase):
+    def setUp(self):
+        super().setUp()
+        import importlib
+
+        import llm
+
+        self.llm = importlib.reload(llm)
+        self.llm.API_KEYS = self.config.API_KEYS
+
+    def _seed(self, order, keys):
+        self.config.API_KEYS.clear()
+        self.config.API_KEYS.update(keys)
+        self.config._settings_cache = {
+            **self.config.DEFAULT_SETTINGS,
+            "provider_order": order,
+            "api_keys": keys,
+        }
+
+    def test_vision_available_with_groq_key(self):
+        self._seed(["groq"], {"groq": "k"})
+        self.assertTrue(self.llm.vision_available())
+
+    def test_vision_unavailable_text_only_key(self):
+        self._seed(["deepseek"], {"deepseek": "k"})
+        self.assertFalse(self.llm.vision_available())
+
+    def test_vision_ocr_uses_groq_qwen(self):
+        self._seed(["groq"], {"groq": "k"})
+        captured = {}
+
+        def fake_post(url, headers, payload):
+            captured["url"] = url
+            captured["payload"] = payload
+            return {"choices": [{"message": {"content": "Hello world"}}]}
+
+        with mock.patch.object(self.llm, "_post_json", side_effect=fake_post):
+            out = self.llm.vision_ocr("AAAA")
+        self.assertEqual(out, "Hello world")
+        self.assertEqual(
+            captured["payload"]["model"],
+            "qwen/qwen3.8-27b",
+        )
+        content = captured["payload"]["messages"][0]["content"]
+        self.assertEqual(content[0]["text"], self.llm.VISION_OCR_PROMPT)
+        self.assertEqual(
+            content[1]["image_url"]["url"], "data:image/jpeg;base64,AAAA"
+        )
+        self.assertEqual(self.llm.LAST_PROVIDER, "groq")
+
+    def test_vision_ocr_falls_through_to_gemini(self):
+        self._seed(["groq", "gemini"], {"groq": "k", "gemini": "k"})
+
+        def fake_post(url, headers, payload):
+            if "groq" in url:
+                raise self.llm.ProviderError("kapow")
+            self.assertIn("inline_data", str(payload))
+            return {"candidates": [{"content": {"parts": [{"text": "from gemini"}]}}]}
+
+        with mock.patch.object(self.llm, "_post_json", side_effect=fake_post):
+            out = self.llm.vision_ocr("AAAA")
+        self.assertEqual(out, "from gemini")
+
+    def test_vision_ocr_no_vision_provider_raises(self):
+        self._seed(["deepseek"], {"deepseek": "k"})
+        with self.assertRaises(self.llm.ProviderError) as ctx:
+            self.llm.vision_ocr("AAAA")
+        self.assertIn("vision-capable", str(ctx.exception))
+
+    def test_prepare_image_upscales_small_and_encodes_jpeg(self):
+        import base64
+
+        import main
+        from PIL import Image
+
+        img = Image.new("RGB", (100, 40), "white")
+        b64, size = main._prepare_ocr_image(img)
+        self.assertEqual(size, (200, 80))
+        raw = base64.b64decode(b64)
+        self.assertEqual(raw[:2], b"\xff\xd8")
+
+    def test_prepare_image_caps_large_captures(self):
+        import main
+        from PIL import Image
+
+        img = Image.new("RGB", (4000, 1000), "white")
+        b64, size = main._prepare_ocr_image(img)
+        self.assertLessEqual(max(size), 1600)
+        self.assertGreater(len(b64), 100)
+
+
 class TestPaletteUI(unittest.TestCase):
     def test_fuzzy_match(self):
         import ui
