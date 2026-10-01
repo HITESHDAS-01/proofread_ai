@@ -120,23 +120,174 @@ def _fuzzy_score(query: str, text: str) -> float:
     return -1.0
 
 
-def open_menu(anchor, groups, on_pick, width=210, max_height=320):
+# Only one dropdown menu open at a time (prevents stacked menus where the
+# close button seems dead because an older menu is still underneath).
+_ACTIVE_MENU = {"win": None, "anchor": None}
+
+
+def _focus_is_inside(win):
+    """True only if the application focus widget lives inside `win`.
+
+    `win.focus_get()` returns the app-global focus widget, so a widget in
+    another window must NOT count as "focused" — that bug kept menus open
+    forever after clicking elsewhere.
+    """
+    try:
+        f = win.focus_get()
+    except Exception:
+        return False
+    if not f:
+        return False
+    w = f
+    while w is not None:
+        if w is win:
+            return True
+        w = getattr(w, "master", None)
+    return False
+
+
+def _close_active_menu():
+    win = _ACTIVE_MENU.get("win")
+    _ACTIVE_MENU["win"] = None
+    _ACTIVE_MENU["anchor"] = None
+    if win is not None:
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+
+def _auto_menu_width(groups):
+    longest = 8
+    for _section, entries in groups:
+        for label, _payload in entries:
+            longest = max(longest, len(str(label)))
+    return max(210, min(340, longest * 7 + 48))
+
+
+def _place_dropdown(win, anchor, max_height=420):
+    """Position a borderless dropdown near `anchor`, always on-screen.
+
+    Prefers below the anchor, falls back to above, and shrinks the height
+    to the available space instead of running off the edge.
+    """
+    try:
+        win.update_idletasks()
+        ax = anchor.winfo_rootx()
+        ay = anchor.winfo_rooty()
+        ah = anchor.winfo_height()
+        w = win.winfo_reqwidth() or 220
+        h = min(win.winfo_reqheight() or max_height, max_height)
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        gap = 5
+        below = sh - (ay + ah) - gap - 4
+        above = ay - gap - 4
+        if h <= below:
+            y = ay + ah + gap
+        elif below >= 200:
+            # prefer opening downward (shrink + scroll) over covering content
+            h = below
+            y = ay + ah + gap
+        elif h <= above:
+            y = ay - h - gap
+        elif above >= below:
+            h = max(170, above)
+            y = ay - h - gap
+        else:
+            h = max(170, below)
+            y = ay + ah + gap
+        x = min(max(4, ax), max(4, sw - w - 4))
+        y = min(max(4, y), max(4, sh - h - 4))
+        win.geometry(f"{int(w)}x{int(h)}+{int(x)}+{int(y)}")
+    except Exception:
+        pass
+
+
+def make_draggable(window, handle):
+    """Allow `window` to be moved by dragging inside `handle` (a header).
+
+    Bindings live on the window itself: events propagate up from children,
+    so drags work from labels/badges in the header regardless of CTk's
+    internal canvas binding redirection. Presses on interactive widgets
+    (buttons, entries, text boxes) or outside the header are ignored so
+    their clicks/selections still work.
+    """
+    st = {"active": False, "x": 0, "y": 0}
+
+    def interactive(widget):
+        while widget is not None and widget is not window:
+            if isinstance(
+                widget,
+                (ctk.CTkButton, ctk.CTkEntry, ctk.CTkTextbox,
+                 tk.Button, tk.Entry, tk.Text),
+            ):
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def in_handle(ev):
+        hx, hy = handle.winfo_rootx(), handle.winfo_rooty()
+        return (hx <= ev.x_root <= hx + handle.winfo_width()
+                and hy <= ev.y_root <= hy + handle.winfo_height())
+
+    def press(ev):
+        st["active"] = in_handle(ev) and not interactive(ev.widget)
+        st["x"], st["y"] = ev.x_root, ev.y_root
+
+    def motion(ev):
+        if not st["active"]:
+            return
+        dx = ev.x_root - st["x"]
+        dy = ev.y_root - st["y"]
+        st["x"], st["y"] = ev.x_root, ev.y_root
+        x = window.winfo_x() + dx
+        y = window.winfo_y() + dy
+        # keep a grip of the window on-screen
+        x = max(40 - window.winfo_width(), min(x, window.winfo_screenwidth() - 40))
+        y = max(0, min(y, window.winfo_screenheight() - 40))
+        window.geometry(f"+{int(x)}+{int(y)}")
+
+    def release(_ev):
+        st["active"] = False
+
+    for seq, fn in (("<Button-1>", press), ("<B1-Motion>", motion),
+                    ("<ButtonRelease-1>", release)):
+        window.bind(seq, fn, add=True)
+    try:
+        handle.configure(cursor="fleur")
+    except Exception:
+        pass
+
+
+def open_menu(anchor, groups, on_pick, width=None, max_height=340):
     """Open a small dropdown under `anchor`.
 
     groups: [(section_label, [(label, payload), ...]), ...]
     on_pick(payload) is called after the menu closes.
+    Clicking the same anchor again toggles the menu closed.
     """
+    if _ACTIVE_MENU.get("anchor") is anchor and _ACTIVE_MENU.get("win") is not None:
+        _close_active_menu()
+        return None
+    _close_active_menu()
+    if width is None:
+        width = _auto_menu_width(groups)
     p = palette()
     win = ctk.CTkToplevel(anchor)
     win.overrideredirect(True)
     win.attributes("-topmost", True)
     win.configure(fg_color=p["card"])
     state = {"win": win}
+    _ACTIVE_MENU["win"] = win
+    _ACTIVE_MENU["anchor"] = anchor
 
     def close():
         if state.get("win") is None:
             return
         state["win"] = None
+        if _ACTIVE_MENU.get("win") is win:
+            _ACTIVE_MENU["win"] = None
+            _ACTIVE_MENU["anchor"] = None
         try:
             win.destroy()
         except Exception:
@@ -178,32 +329,28 @@ def open_menu(anchor, groups, on_pick, width=210, max_height=320):
                 command=lambda pl=payload: pick(pl),
             ).pack(fill="x", padx=2, pady=1)
 
-    try:
-        win.update_idletasks()
-        x = anchor.winfo_rootx()
-        y = anchor.winfo_rooty() + anchor.winfo_height() + 4
-        w = win.winfo_reqwidth() or width + 12
-        h = win.winfo_reqheight() or 340
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        if x + w > sw:
-            x = max(4, sw - w - 6)
-        if y + h > sh:
-            y = max(4, anchor.winfo_rooty() - h - 4)
-        win.geometry(f"+{x}+{y}")
-    except Exception:
-        pass
+    _place_dropdown(win, anchor, max_height=max_height)
     win.bind("<Escape>", lambda e: close())
 
     def check_focus():
         if state.get("win") is None:
             return
         try:
-            if not win.focus_get():
+            if not _focus_is_inside(win):
                 close()
         except Exception:
             close()
 
-    win.after(80, lambda: (win.focus_force(), win.bind("<FocusOut>", lambda e: win.after(120, check_focus))))
+    def grab():
+        if state.get("win") is None:
+            return
+        try:
+            win.focus_force()
+            win.bind("<FocusOut>", lambda e: win.after(120, check_focus))
+        except Exception:
+            pass
+
+    win.after(80, grab)
     return win
 
 
@@ -456,6 +603,7 @@ class Popup(ResultActions, ctk.CTkToplevel):
         )
         if provider:
             badge(header, PROVIDER_LABELS.get(provider, provider), ACCENT).pack(side="right")
+        make_draggable(self, header)
 
         body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=14, pady=6)
@@ -628,21 +776,7 @@ class TranslateControl:
         win.after(60, self._grab_and_close_on_focus_out)
 
     def _position_menu(self):
-        win = self._menu_win
-        try:
-            win.update_idletasks()
-            x = self.btn.winfo_rootx()
-            y = self.btn.winfo_rooty() + self.btn.winfo_height() + 4
-            w = win.winfo_reqwidth() or 210
-            h = win.winfo_reqheight() or 360
-            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-            if x + w > sw:
-                x = max(4, sw - w - 6)
-            if y + h > sh:
-                y = max(4, self.btn.winfo_rooty() - h - 4)
-            win.geometry(f"+{x}+{y}")
-        except Exception:
-            pass
+        _place_dropdown(self._menu_win, self.btn, max_height=380)
 
     def _grab_and_close_on_focus_out(self):
         win = self._menu_win
@@ -663,7 +797,7 @@ class TranslateControl:
         if win is None:
             return
         try:
-            if not win.focus_get():
+            if not _focus_is_inside(win):
                 self._close_menu()
         except Exception:
             self._close_menu()
@@ -743,6 +877,7 @@ class ResultOverlay(ResultActions, ctk.CTkToplevel):
             badge(header, PROVIDER_LABELS.get(provider, provider), ACCENT).pack(
                 side="right"
             )
+        make_draggable(self, header)
 
         box = ctk.CTkTextbox(
             self, height=64, width=340, wrap="word", fg_color=p["card2"],

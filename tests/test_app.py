@@ -834,6 +834,16 @@ class TestPaletteUI(unittest.TestCase):
         self.assertTrue(ui.fuzzy_match("", "anything"))
         self.assertFalse(ui.fuzzy_match("zzz", "Professional Email"))
 
+    def test_menu_auto_width_grows_and_clamps(self):
+        import ui
+
+        short = ui._auto_menu_width([("A", [("Format", "f")])])
+        long_lbl = "x" * 80
+        long = ui._auto_menu_width([("A", [(long_lbl, "f")])])
+        self.assertEqual(short, 210)
+        self.assertEqual(long, 340)
+        self.assertGreaterEqual(ui._auto_menu_width([("A", [("A rather long label here", "f")])]), 210)
+
     def test_fuzzy_score_orders_prefix_first(self):
         import ui
 
