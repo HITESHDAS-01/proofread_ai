@@ -14,7 +14,6 @@ from config import (
     TRANSLATE_LANGS,
     VERSION,
     API_KEYS,
-    action_label,
     get,
     load_settings,
     reload_api_keys,
@@ -255,8 +254,78 @@ def make_draggable(window, handle):
         window.bind(seq, fn, add=True)
     try:
         handle.configure(cursor="fleur")
+        canvas = getattr(handle, "_canvas", None)
+        if canvas is not None:
+            canvas.configure(cursor="fleur")
     except Exception:
         pass
+
+
+def _enable_resize(window, min_w=340, min_h=200):
+    """Make a borderless window resizable: right/bottom edge strips +
+    a visible bottom-right corner grip. The window can grow freely but
+    never shrinks below its content (min = requested size at enable time).
+    """
+    try:
+        window.update_idletasks()
+        min_w = max(min_w, window.winfo_reqwidth())
+        min_h = max(min_h, window.winfo_reqheight())
+    except Exception:
+        pass
+    st = {"dir": None, "x": 0, "y": 0, "w": 0, "h": 0}
+    window._resize_state = st
+    p = palette()
+
+    def motion(ev):
+        if st["dir"] is None:
+            return
+        dx = ev.x_root - st["x"]
+        dy = ev.y_root - st["y"]
+        w, h = st["w"], st["h"]
+        if "e" in st["dir"]:
+            w += dx
+        if "s" in st["dir"]:
+            h += dy
+        window.geometry(f"{max(min_w, w)}x{max(min_h, h)}")
+
+    def end(_ev):
+        st["dir"] = None
+
+    def wire(widget, direction):
+        def press(ev):
+            st.update(dir=direction, x=ev.x_root, y=ev.y_root,
+                      w=window.winfo_width(), h=window.winfo_height())
+        canvas = getattr(widget, "_canvas", None)
+        for target in (widget, canvas) if canvas is not None else (widget,):
+            for seq, fn in (("<Button-1>", press), ("<B1-Motion>", motion),
+                            ("<ButtonRelease-1>", end)):
+                target.bind(seq, fn)
+            try:
+                target.configure(cursor=cursor_map.get(direction, ""))
+            except Exception:
+                pass
+        widget.lift()
+        return widget
+
+    cursor_map = {"e": "sb_h_double_arrow", "s": "sb_v_double_arrow",
+                  "es": "size_nw_se"}
+
+    right = ctk.CTkLabel(window, text="", fg_color="transparent", width=6)
+    right.place(relx=1.0, rely=0.0, anchor="ne", relheight=1.0)
+    bottom = ctk.CTkLabel(window, text="", fg_color="transparent", height=6)
+    bottom.place(relx=0.0, rely=1.0, anchor="sw", relwidth=1.0)
+    grip = ctk.CTkLabel(
+        window, text="◢", fg_color="transparent",
+        text_color=p["muted"], font=("Segoe UI", 10),
+        width=22, height=22,
+    )
+    grip.place(relx=1.0, rely=1.0, anchor="se")
+
+    window._resize_strips = [
+        wire(right, "e"),
+        wire(bottom, "s"),
+        wire(grip, "es"),
+    ]
 
 
 def open_menu(anchor, groups, on_pick, width=None, max_height=340):
@@ -469,6 +538,13 @@ class ResultActions:
     def _run_action(self, spec):
         if not getattr(self, "_on_action", None):
             return
+        sub = getattr(self, "_action_sub_label", None)
+        if sub is not None:
+            try:
+                name = str(spec.get("name")) if spec.get("command") else ""
+                sub.configure(text=f"  ·  {name}" if name else "")
+            except Exception:
+                pass
         self._set_actions_enabled(False)
         if getattr(self, "_action_status", None) is not None:
             self._action_status.configure(text="Working…", text_color=ACCENT)
@@ -597,10 +673,15 @@ class Popup(ResultActions, ctk.CTkToplevel):
         header.pack(fill="x", padx=18, pady=(16, 6))
         left = ctk.CTkFrame(header, fg_color="transparent")
         left.pack(side="left")
-        title = action_name or action_label(action)
-        ctk.CTkLabel(left, text=f"✦ {title}", font=("Segoe UI Semibold", 18), text_color=p["text"]).pack(
-            anchor="w"
+        ctk.CTkLabel(
+            left, text="✦ TextMate AI", font=("Segoe UI Semibold", 18),
+            text_color=p["text"],
+        ).pack(side="left")
+        self._action_sub_label = ctk.CTkLabel(
+            left, text=f"  ·  {action_name}" if action_name else "",
+            font=("Segoe UI", 13), text_color=p["muted"],
         )
+        self._action_sub_label.pack(side="left", padx=(8, 0))
         if provider:
             badge(header, PROVIDER_LABELS.get(provider, provider), ACCENT).pack(side="right")
         make_draggable(self, header)
@@ -868,11 +949,15 @@ class ResultOverlay(ResultActions, ctk.CTkToplevel):
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=12, pady=(10, 2))
-        title = action_name or action_label(action)
         ctk.CTkLabel(
-            header, text=f"✦ {title}", font=("Segoe UI Semibold", 12),
+            header, text="✦ TextMate AI", font=("Segoe UI Semibold", 12),
             text_color=ACCENT,
         ).pack(side="left")
+        self._action_sub_label = ctk.CTkLabel(
+            header, text=f"  ·  {action_name}" if action_name else "",
+            font=("Segoe UI", 11), text_color=p["muted"],
+        )
+        self._action_sub_label.pack(side="left", padx=(6, 0))
         if provider:
             badge(header, PROVIDER_LABELS.get(provider, provider), ACCENT).pack(
                 side="right"
@@ -880,11 +965,11 @@ class ResultOverlay(ResultActions, ctk.CTkToplevel):
         make_draggable(self, header)
 
         box = ctk.CTkTextbox(
-            self, height=64, width=340, wrap="word", fg_color=p["card2"],
+            self, height=96, width=340, wrap="word", fg_color=p["card2"],
             border_width=1, border_color=p["border"], text_color=p["text"],
             font=("Segoe UI", 12),
         )
-        box.pack(fill="x", padx=12, pady=(4, 8))
+        box.pack(fill="both", expand=True, padx=12, pady=(4, 8))
         self.corr_box = box
         self._set_result_text(corrected)
 
@@ -894,7 +979,7 @@ class ResultOverlay(ResultActions, ctk.CTkToplevel):
             self.translate_ctl = TranslateControl(self, self, on_translate, width=132)
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
-        btns.pack(fill="x", padx=12, pady=(0, 10))
+        btns.pack(fill="x", padx=(12, 30), pady=(0, 10))
         replace_btn = ctk.CTkButton(
             btns, text="Replace", command=self._replace, width=110, height=34,
             fg_color=ACCENT, hover_color="#3a76e0", corner_radius=8,
@@ -923,6 +1008,7 @@ class ResultOverlay(ResultActions, ctk.CTkToplevel):
 
         self.bind("<Key>", self._on_key)
 
+        _enable_resize(self)
         self._place_near_cursor()
         self.after_idle(self.focus_force)
 
